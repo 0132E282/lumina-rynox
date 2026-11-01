@@ -1,17 +1,18 @@
 import { Link, router } from '@inertiajs/react';
-import { ChevronDown, Trash2 } from 'lucide-react';
+import { vendorShortName } from '@/lib/ai-account';
+import { invalidateAiChatCache } from '@/lib/ai-chat-cache';
+import { Plus, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { toggle } from '@/actions/App/Http/Controllers/AiAccountController';
 import { show } from '@/actions/App/Http/Controllers/IntegrationController';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuGroup,
-    DropdownMenuItem,
-    DropdownMenuLabel,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -91,7 +92,7 @@ export function ChatSettingsAdvanced({
                                         {account.name}
                                     </span>
                                     <span className="block truncate text-xs text-muted-foreground">
-                                        {account.vendor.split(' (')[0]} · ưu
+                                        {vendorShortName(account.vendor)} · ưu
                                         tiên {account.priority}
                                         {account.id === selection.accountId &&
                                             ' · đang dùng cho chat'}
@@ -116,6 +117,10 @@ export function ChatSettingsAdvanced({
                                                         'aiAccountList',
                                                         'aiAccounts',
                                                     ],
+                                                    onSuccess: () =>
+                                                        invalidateAiChatCache(
+                                                            'usage',
+                                                        ),
                                                 },
                                             )
                                         }
@@ -169,8 +174,25 @@ export function ChatSettingsAdvanced({
 const samePair = (a: AiChatPurposeChoice, b: AiChatPurposeChoice) =>
     a.account_id === b.account_id && a.model === b.model;
 
+/** Select values cannot be null: these stand for "automatic" and "the account's own model". */
+const AUTO = 'auto';
+const OWN_MODEL = 'own';
+
+/** A row of the card: no account yet means it is not stored. */
+type Row = { account_id: number | null; model: string | null };
+
+const EMPTY_ROW: Row = { account_id: null, model: null };
+
+const complete = (rows: Row[]): AiChatPurposeChoice[] =>
+    rows.flatMap((row) =>
+        row.account_id === null
+            ? []
+            : [{ account_id: row.account_id, model: row.model }],
+    );
+
 /**
- * One purpose: a compact card. The header dropdown ("Chọn AI") adds an account + model in one step; the rows below are plain text with a delete button, tried in the order they were added. Empty = automatic by priority.
+ * One purpose: a compact card with one row per AI to try, in the order listed. Each row is two selects (AI, model) and a delete button; "+" in the header adds a fallback row.
+ * Only rows with an AI are stored; an empty card means automatic by priority.
  */
 function PurposeCard({
     label,
@@ -187,6 +209,21 @@ function PurposeCard({
     disabled: boolean;
     onChange: (choices: AiChatPurposeChoice[]) => void;
 }) {
+    const [rows, setRows] = useState<Row[]>(
+        choices.length > 0 ? choices : [EMPTY_ROW],
+    );
+
+    // * The stored choices changed from outside (saved, reset): show them. Empty rows the person added meanwhile are not stored, so they never trigger this.
+    useEffect(() => {
+        setRows((current) =>
+            JSON.stringify(complete(current)) === JSON.stringify(choices)
+                ? current
+                : choices.length > 0
+                  ? choices
+                  : [EMPTY_ROW],
+        );
+    }, [choices]);
+
     const usable = accounts.filter(
         (account) =>
             account.enabled &&
@@ -194,117 +231,163 @@ function PurposeCard({
             (account.purposes === null ||
                 account.purposes.includes(purposeKey)),
     );
-    const full = choices.length >= MAX_CHOICES;
-    const taken = (pair: AiChatPurposeChoice) =>
-        choices.some((choice) => samePair(choice, pair));
-    const modelLabel = (
-        account: AiChatAccountRow | undefined,
-        id: string | null,
-    ) =>
-        id === null
-            ? 'Mặc định của tài khoản'
-            : (account?.models.find((model) => model.id === id)?.label ?? id);
+    const modelsOf = (accountId: number) => [
+        { id: null as string | null, label: 'Mặc định của tài khoản' },
+        ...(accounts.find((account) => account.id === accountId)?.models ?? []),
+    ];
+    const takenByOther = (index: number, pair: AiChatPurposeChoice) =>
+        rows.some(
+            (row, position) =>
+                position !== index &&
+                row.account_id !== null &&
+                samePair(
+                    { account_id: row.account_id, model: row.model },
+                    pair,
+                ),
+        );
+
+    const apply = (next: Row[]) => {
+        setRows(next);
+        onChange(complete(next));
+    };
+    const update = (index: number, row: Row) =>
+        apply(rows.map((current, i) => (i === index ? row : current)));
+
+    const pickAccount = (index: number, value: string) => {
+        if (value === AUTO) {
+            update(index, EMPTY_ROW);
+
+            return;
+        }
+
+        const accountId = Number(value);
+        const free = modelsOf(accountId).find(
+            (model) =>
+                !takenByOther(index, {
+                    account_id: accountId,
+                    model: model.id,
+                }),
+        );
+
+        // * Every model of this account is already in another row: keep the row as it was.
+        if (free !== undefined) {
+            update(index, { account_id: accountId, model: free.id });
+        }
+    };
+
+    const remove = (index: number) =>
+        rows.length > 1
+            ? apply(rows.filter((_, i) => i !== index))
+            : apply([EMPTY_ROW]);
 
     return (
         <Card className="gap-2 py-3">
             <CardHeader className="flex flex-row items-center justify-between gap-2 px-4">
                 <CardTitle className="text-sm">{label}</CardTitle>
-                <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+                <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    disabled={
+                        disabled ||
+                        rows.length >= MAX_CHOICES ||
+                        usable.length === 0
+                    }
+                    aria-label={`Thêm AI dự phòng cho: ${label}`}
+                    onClick={() => setRows([...rows, EMPTY_ROW])}
+                >
+                    <Plus aria-hidden="true" />
+                </Button>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2 px-4">
+                {rows.map((row, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                        <Select
+                            value={
+                                row.account_id === null
+                                    ? ''
+                                    : String(row.account_id)
+                            }
+                            disabled={disabled}
+                            onValueChange={(value) => pickAccount(index, value)}
+                        >
+                            <SelectTrigger
+                                className="min-w-0 flex-1"
+                                aria-label={`AI ${index + 1} của: ${label}`}
+                            >
+                                <SelectValue placeholder="Chọn AI" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value={AUTO}>
+                                    Tự động theo ưu tiên
+                                </SelectItem>
+                                {usable.map((account) => (
+                                    <SelectItem
+                                        key={account.id}
+                                        value={String(account.id)}
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <VendorBadge
+                                                vendorKey={account.vendor_key}
+                                                fallback={account.vendor}
+                                                className="size-5"
+                                            />
+                                            {account.name}
+                                        </span>
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <Select
+                            value={
+                                row.account_id === null
+                                    ? ''
+                                    : (row.model ?? OWN_MODEL)
+                            }
+                            disabled={disabled || row.account_id === null}
+                            onValueChange={(value) =>
+                                update(index, {
+                                    account_id: row.account_id,
+                                    model: value === OWN_MODEL ? null : value,
+                                })
+                            }
+                        >
+                            <SelectTrigger
+                                className="min-w-0 flex-1"
+                                aria-label={`Model ${index + 1} của: ${label}`}
+                            >
+                                <SelectValue placeholder="Chọn model" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {row.account_id !== null &&
+                                    modelsOf(row.account_id).map((model) => (
+                                        <SelectItem
+                                            key={model.id ?? OWN_MODEL}
+                                            value={model.id ?? OWN_MODEL}
+                                            disabled={takenByOther(index, {
+                                                account_id: row.account_id!,
+                                                model: model.id,
+                                            })}
+                                        >
+                                            {model.label}
+                                        </SelectItem>
+                                    ))}
+                            </SelectContent>
+                        </Select>
                         <Button
                             type="button"
-                            variant="outline"
-                            size="sm"
-                            className="h-7 gap-1 px-2 text-xs"
-                            disabled={disabled || full || usable.length === 0}
-                            aria-label={`Chọn AI cho: ${label}`}
+                            variant="ghost"
+                            size="icon"
+                            className="size-7 shrink-0"
+                            disabled={disabled}
+                            aria-label={`Xóa dòng ${index + 1} của: ${label}`}
+                            onClick={() => remove(index)}
                         >
-                            Chọn AI
-                            <ChevronDown aria-hidden="true" />
+                            <Trash2 aria-hidden="true" />
                         </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="max-h-80">
-                        {usable.map((account, index) => (
-                            <DropdownMenuGroup key={account.id}>
-                                {index > 0 && <DropdownMenuSeparator />}
-                                <DropdownMenuLabel>
-                                    {account.name}
-                                </DropdownMenuLabel>
-                                {[
-                                    {
-                                        id: null,
-                                        label: modelLabel(account, null),
-                                    },
-                                    ...account.models,
-                                ].map((model) => (
-                                    <DropdownMenuItem
-                                        key={model.id ?? 'own'}
-                                        disabled={taken({
-                                            account_id: account.id,
-                                            model: model.id,
-                                        })}
-                                        onSelect={() =>
-                                            onChange([
-                                                ...choices,
-                                                {
-                                                    account_id: account.id,
-                                                    model: model.id,
-                                                },
-                                            ])
-                                        }
-                                    >
-                                        {model.label}
-                                    </DropdownMenuItem>
-                                ))}
-                            </DropdownMenuGroup>
-                        ))}
-                    </DropdownMenuContent>
-                </DropdownMenu>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-1 px-4">
-                {choices.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                        Tự động theo ưu tiên
-                    </p>
-                ) : (
-                    choices.map((choice, index) => {
-                        const account = accounts.find(
-                            (row) => row.id === choice.account_id,
-                        );
-
-                        return (
-                            <div
-                                key={`${choice.account_id}|${choice.model ?? ''}`}
-                                className="flex items-center gap-2 text-sm"
-                            >
-                                <span className="min-w-0 flex-1 truncate">
-                                    {account?.name ?? `#${choice.account_id}`}
-                                    <span className="text-muted-foreground">
-                                        {' · '}
-                                        {modelLabel(account, choice.model)}
-                                    </span>
-                                </span>
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    className="size-7"
-                                    disabled={disabled}
-                                    aria-label={`Xóa dòng ${index + 1} của: ${label}`}
-                                    onClick={() =>
-                                        onChange(
-                                            choices.filter(
-                                                (_, i) => i !== index,
-                                            ),
-                                        )
-                                    }
-                                >
-                                    <Trash2 aria-hidden="true" />
-                                </Button>
-                            </div>
-                        );
-                    })
-                )}
+                    </div>
+                ))}
             </CardContent>
         </Card>
     );

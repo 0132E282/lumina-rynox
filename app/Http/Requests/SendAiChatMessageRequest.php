@@ -16,6 +16,9 @@ class SendAiChatMessageRequest extends FormRequest
 
     public const MAX_ATTACHMENTS = 5;
 
+    /** Read-only repos / local folders that may join the chosen project in one message. */
+    public const MAX_EXTRA_SOURCES = 3;
+
     public const MAX_ATTACHMENT_KB = 2048;
 
     public function authorize(): bool
@@ -35,6 +38,10 @@ class SendAiChatMessageRequest extends FormRequest
             'auto_pr' => ['nullable', 'boolean'],
             'local_root' => ['nullable', 'string', 'regex:/^[a-z0-9_-]{1,40}$/', 'prohibits:repo'],
             'repo' => ['nullable', 'string', 'max:140', 'regex:#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$#'],
+            'extra_repos' => ['nullable', 'array', 'max:'.self::MAX_EXTRA_SOURCES],
+            'extra_repos.*' => ['string', 'max:140', 'regex:#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$#', 'distinct'],
+            'extra_local_roots' => ['nullable', 'array', 'max:'.self::MAX_EXTRA_SOURCES],
+            'extra_local_roots.*' => ['string', 'regex:/^[a-z0-9_-]{1,40}$/', 'distinct'],
             'attachments' => ['nullable', 'array', 'max:'.self::MAX_ATTACHMENTS],
             'attachments.*' => ['file', 'max:'.self::MAX_ATTACHMENT_KB, 'extensions:'.implode(',', ChatAttachmentReader::extensions())],
         ];

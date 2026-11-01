@@ -1,10 +1,21 @@
 import { Link } from '@inertiajs/react';
-import { ChevronDown, ChevronRight, Lock, Plus } from 'lucide-react';
+import { Folder, FolderOpen, Lock, Plus } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { repos as reposRoute } from '@/actions/App/Http/Controllers/AiChatController';
+import {
+    LocalProjectDialog,
+    localUnavailableReason,
+} from '@/components/ai-chat/local-project-dialog';
+import type {
+    LocalProject,
+    LocalProjectsChange,
+    LocalRoot,
+} from '@/components/ai-chat/local-project-dialog';
+import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useCachedRequest } from '@/hooks/use-cached-request';
 import { api } from '@/lib/api';
-import { cachedRequest } from '@/lib/ai-chat-cache';
+import { cachedRequest, invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import { requestErrorMessage } from '@/lib/ai-error';
 import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
 import { cn } from '@/lib/utils';
@@ -13,7 +24,7 @@ import type { AiChatConversation, AiChatRepo } from '@/types';
 
 const REPOS_TTL_MS = 5 * 60 * 1000;
 
-/** * "Code" tab: the GitHub repos the token can read; picking one selects it for the chat and opens its code. */
+/** * "Code" tab: the projects the person can open (GitHub repos the token can read, plus the allowed local folders); picking one selects it for the chat and opens its code. */
 export function ProjectsTab({
     repo,
     onSelect,
@@ -23,7 +34,7 @@ export function ProjectsTab({
     onNavigate,
 }: {
     repo: string | null;
-    onSelect: (repo: string) => void;
+    onSelect: (repo: string, extras?: string[]) => void;
     connected: boolean;
     /** * Saved chats; each project lists the ones held about it. */
     conversations: AiChatConversation[];
@@ -34,6 +45,33 @@ export function ProjectsTab({
     const [repos, setRepos] = useState<AiChatRepo[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
+    // * Same cached request as the "Máy local" menu: labels only, never a server path.
+    const { data: local, mutate: mutateLocal } = useCachedRequest(
+        'local.status',
+        REPOS_TTL_MS,
+        () =>
+            api
+                .get<{
+                    enabled: boolean;
+                    can_read: boolean;
+                    can_write: boolean;
+                    roots: LocalRoot[];
+                    projects: LocalProject[];
+                }>('/ai-chat/local/status')
+                .then(({ data }) => data),
+        true,
+    );
+    const [createOpen, setCreateOpen] = useState(false);
+    const canCreate = local?.enabled === true && local.can_write;
+    const localRows: AiChatRepo[] =
+        local?.enabled && local.can_read
+            ? local.roots.map((root) => ({
+                  full_name: `local:${root.id}`,
+                  private: false,
+                  default_branch: '',
+                  description: null,
+              }))
+            : [];
 
     useEffect(() => {
         if (!connected) {
@@ -66,7 +104,7 @@ export function ProjectsTab({
         };
     }, [connected]);
 
-    if (!connected) {
+    if (!connected && localRows.length === 0) {
         return (
             <p className="px-2 text-sm text-muted-foreground">
                 Chưa kết nối GitHub.{' '}
@@ -80,22 +118,63 @@ export function ProjectsTab({
         );
     }
 
+    const projectsChanged = (change: LocalProjectsChange) => {
+        invalidateAiChatCache('local.');
+
+        if (local) {
+            mutateLocal({ ...local, ...change });
+        }
+    };
+
     const query = search.trim().toLowerCase();
-    const shown = (repos ?? []).filter((row) =>
-        row.full_name.toLowerCase().includes(query),
+    const shown = [...(connected ? (repos ?? []) : []), ...localRows].filter(
+        (row) => row.full_name.toLowerCase().includes(query),
     );
 
     return (
         <div className="flex min-h-0 flex-1 flex-col gap-3">
+            <div className="flex items-center justify-between gap-2 px-1">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                    Dự án
+                </h2>
+                <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1.5 px-2 text-xs"
+                    title="Tạo mới dự án"
+                    onClick={() => setCreateOpen(true)}
+                >
+                    <Plus aria-hidden="true" />
+                    Thêm mới dự án
+                </Button>
+            </div>
             <Input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 aria-label="Tìm repo"
                 placeholder="Tìm repo..."
-                className="h-8"
+                className="h-8 font-medium placeholder:font-normal"
+            />
+            <LocalProjectDialog
+                open={createOpen}
+                onOpenChange={setCreateOpen}
+                projects={local?.projects ?? []}
+                onChanged={projectsChanged}
+                githubRepos={connected ? repos : null}
+                onPickRepos={(list) => {
+                    if (list.length > 0) {
+                        onSelect(list[0], list.slice(1));
+                    }
+                }}
+                title="Tạo mới dự án"
+                initialSource="local"
+                unavailable={localUnavailableReason(local)}
+                localRoots={local?.enabled && local.can_read ? local.roots : []}
+                selected={repo === null ? [] : [repo]}
             />
             <div className="min-h-0 flex-1 overflow-y-auto">
-                {repos === null ? (
+                {connected && repos === null ? (
                     <p className="px-2 text-sm text-muted-foreground">
                         Đang tải...
                     </p>
@@ -147,24 +226,26 @@ export function ProjectsTab({
                                                 : undefined
                                         }
                                         className={cn(
-                                            'flex w-full items-center gap-1.5 rounded-sm px-2 py-2 text-left text-sm transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none',
+                                            'flex w-full items-center gap-1.5 rounded-lg px-2 py-2 text-left text-sm font-medium transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none',
                                             row.full_name === repo &&
                                                 'bg-accent text-accent-foreground',
                                         )}
                                     >
                                         {isOpen ? (
-                                            <ChevronDown
+                                            <FolderOpen
                                                 aria-hidden="true"
-                                                className="size-3.5 shrink-0"
+                                                className="size-4 shrink-0 text-muted-foreground"
                                             />
                                         ) : (
-                                            <ChevronRight
+                                            <Folder
                                                 aria-hidden="true"
-                                                className="size-3.5 shrink-0"
+                                                className="size-4 shrink-0 text-muted-foreground"
                                             />
                                         )}
                                         <span className="truncate">
-                                            {row.full_name}
+                                            {row.full_name.startsWith('local:')
+                                                ? row.full_name.slice(6)
+                                                : row.full_name}
                                         </span>
                                         {row.private && (
                                             <Lock
@@ -173,13 +254,13 @@ export function ProjectsTab({
                                             />
                                         )}
                                         {chats.length > 0 && (
-                                            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                                            <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
                                                 {chats.length}
                                             </span>
                                         )}
                                     </button>
                                     {isOpen && (
-                                        <ul className="mt-0.5 mb-1 ml-5 flex flex-col gap-0.5 border-l pl-2">
+                                        <ul className="mt-0.5 mb-1 ml-4 flex flex-col gap-0.5 pl-3">
                                             <li>
                                                 {/* * Same action as picking the project (a fresh chat for it); the name is plain text. */}
                                                 <button
@@ -188,7 +269,7 @@ export function ProjectsTab({
                                                         onSelect(row.full_name)
                                                     }
                                                     aria-label={`Cuộc trò chuyện mới trong ${row.full_name}`}
-                                                    className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
+                                                    className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
                                                 >
                                                     <Plus
                                                         aria-hidden="true"
@@ -198,7 +279,7 @@ export function ProjectsTab({
                                                 </button>
                                             </li>
                                             {chats.length === 0 ? (
-                                                <li className="px-2 py-1 text-xs text-muted-foreground">
+                                                <li className="px-2 py-1 text-sm text-foreground/70">
                                                     Chưa có đoạn chat nào.
                                                 </li>
                                             ) : (
@@ -219,7 +300,7 @@ export function ProjectsTab({
                                                                     : undefined
                                                             }
                                                             className={cn(
-                                                                'block truncate rounded-sm px-2 py-1.5 text-sm transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
+                                                                'block truncate rounded-lg px-2 py-1.5 text-sm text-foreground/80 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
                                                                 conversation.id ===
                                                                     activeId &&
                                                                     'bg-accent text-accent-foreground',

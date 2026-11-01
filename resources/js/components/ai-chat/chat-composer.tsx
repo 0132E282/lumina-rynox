@@ -1,5 +1,6 @@
 import {
     ArrowUp,
+    Bot,
     Check,
     ChevronDown,
     ListChecks,
@@ -11,8 +12,14 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import { RepoPicker } from '@/components/ai-chat/repo-picker';
+import { SourceIcon } from '@/components/ai-chat/source-icon';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { Button } from '@/components/ui/button';
+import {
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
+} from '@/components/ui/popover';
 import { matchCommands } from '@/lib/ai-commands';
 import type { AiCommand } from '@/lib/ai-commands';
 import { cn } from '@/lib/utils';
@@ -24,7 +31,12 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import type { AiChatAccount, AiChatMode, AiChatSelection } from '@/types';
+import type {
+    AiAgentRun,
+    AiChatAccount,
+    AiChatMode,
+    AiChatSelection,
+} from '@/types';
 
 /**
  * Rounded textarea + round send button. Custom (not the shared `Field`) because it needs Enter-to-send with Shift+Enter for a newline.
@@ -34,6 +46,7 @@ export function ChatComposer({
     onChange,
     onSubmit,
     sending,
+    agents,
     maxLength,
     autoFocus = false,
     accounts,
@@ -45,11 +58,11 @@ export function ChatComposer({
     maxFiles,
     repo,
     onRepoChange,
+    extraRepos,
+    onExtraReposChange,
     githubConnected,
     onOptimize,
     optimizing,
-    autoPr,
-    onAutoPrChange,
     mode,
     onModeChange,
     onUndoOptimize,
@@ -58,6 +71,8 @@ export function ChatComposer({
     onChange: (value: string) => void;
     onSubmit: () => void;
     sending: boolean;
+    /** * Agents working right now (every chat of the page): shown as a count, listed in a popover. */
+    agents: AiAgentRun[];
     maxLength: number;
     autoFocus?: boolean;
     /** * Enabled AI accounts the person can pick to answer (Claude, Codex, ...). */
@@ -72,6 +87,8 @@ export function ChatComposer({
     /** * `owner/name` of the GitHub repo the AI may read, or null. */
     repo: string | null;
     onRepoChange: (repo: string | null) => void;
+    extraRepos: string[];
+    onExtraReposChange: (extras: string[]) => void;
     githubConnected: boolean;
     onOptimize: () => void;
     optimizing: boolean;
@@ -99,6 +116,21 @@ export function ChatComposer({
             textareaRef.current?.focus();
         }
     }, [sending, optimizing]);
+
+    // * Ticks every second while an agent works, so the times in the list keep moving.
+    const [now, setNow] = useState(() => Date.now());
+
+    useEffect(() => {
+        if (agents.length === 0) {
+            return;
+        }
+
+        setNow(Date.now());
+
+        const timer = window.setInterval(() => setNow(Date.now()), 1000);
+
+        return () => window.clearInterval(timer);
+    }, [agents.length]);
 
     const picked = accounts.find(
         (account) => account.id === selection.accountId,
@@ -173,6 +205,8 @@ export function ChatComposer({
     };
 
     const busy = sending || optimizing;
+    const [projectTitle, setProjectTitle] = useState('');
+    const pickedProjects = repo === null ? [] : [repo, ...extraRepos];
 
     return (
         <div className="relative flex flex-col gap-2">
@@ -209,6 +243,68 @@ export function ChatComposer({
                     ))}
                 </ul>
             )}
+            <ul
+                aria-label="Dự án đã chọn"
+                className="flex flex-wrap gap-1.5 px-1"
+            >
+                {repo !== null && projectTitle !== '' && (
+                    <li className="max-w-56 truncate px-1 py-1 text-xs font-medium">
+                        {projectTitle}
+                    </li>
+                )}
+                {pickedProjects.map((id) => {
+                    const local = id.startsWith('local:');
+                    const name = local ? id.slice(6) : id;
+
+                    return (
+                        <li
+                            key={id}
+                            title={name}
+                            className="flex max-w-56 items-center gap-1.5 rounded-lg bg-muted py-1 pr-1 pl-2 text-xs"
+                        >
+                            <SourceIcon
+                                local={local}
+                                className="text-muted-foreground"
+                            />
+                            <span className="truncate">
+                                {name.split('/').pop()}
+                            </span>
+                            <button
+                                type="button"
+                                aria-label={`Bỏ dự án ${name}`}
+                                disabled={busy}
+                                onClick={() => {
+                                    const rest = pickedProjects.filter(
+                                        (item) => item !== id,
+                                    );
+
+                                    onRepoChange(rest[0] ?? null);
+                                    if (rest.length === 0) {
+                                        setProjectTitle('');
+                                    }
+                                    onExtraReposChange(rest.slice(1));
+                                }}
+                                className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                            >
+                                <X aria-hidden="true" className="size-3" />
+                            </button>
+                        </li>
+                    );
+                })}
+                <li>
+                    <RepoPicker
+                        projectTitle={projectTitle}
+                        onProjectTitleChange={setProjectTitle}
+                        compact
+                        repo={repo}
+                        onChange={onRepoChange}
+                        extras={extraRepos}
+                        onExtrasChange={onExtraReposChange}
+                        connected={githubConnected}
+                        disabled={busy}
+                    />
+                </li>
+            </ul>
             <form
                 onSubmit={submit}
                 className="flex flex-col gap-1 rounded-2xl border border-input bg-card px-3 pt-3 pb-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50 dark:bg-input/30"
@@ -260,7 +356,7 @@ export function ChatComposer({
                     placeholder="Nhắn tin cho trợ lý AI"
                     className="[field-sizing:content] max-h-48 min-h-8 w-full resize-none bg-transparent px-1 py-1 text-base outline-none placeholder:text-muted-foreground disabled:opacity-60 md:text-sm"
                 />
-                <div className="flex items-center gap-1">
+                <div className="flex flex-wrap items-center gap-1">
                     <input
                         ref={fileInputRef}
                         type="file"
@@ -290,14 +386,6 @@ export function ChatComposer({
                     >
                         <Paperclip aria-hidden="true" />
                     </Button>
-                    <RepoPicker
-                        repo={repo}
-                        onChange={onRepoChange}
-                        connected={githubConnected}
-                        disabled={busy}
-                        autoPr={autoPr}
-                        onAutoPrChange={onAutoPrChange}
-                    />
                     <Button
                         type="button"
                         variant="ghost"
@@ -323,7 +411,82 @@ export function ChatComposer({
                             Hoàn tác
                         </Button>
                     )}
-                    <div className="ml-auto flex items-center gap-1">
+                    <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
+                        <Popover>
+                            <PopoverTrigger asChild>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    aria-label={
+                                        agents.length === 0
+                                            ? 'Agent: đang rảnh'
+                                            : `${agents.length} agent đang làm việc`
+                                    }
+                                    className="h-8 shrink-0 gap-1.5 px-2 text-muted-foreground"
+                                >
+                                    <Bot aria-hidden="true" />
+                                    {agents.length === 0 ? (
+                                        'Agent'
+                                    ) : (
+                                        <>
+                                            <span
+                                                aria-hidden="true"
+                                                className="size-1.5 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
+                                            />
+                                            {agents.length} agent
+                                        </>
+                                    )}
+                                </Button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                                align="end"
+                                className="w-80 p-2"
+                                aria-label="Agent đang làm việc"
+                            >
+                                {agents.length === 0 ? (
+                                    <p className="px-2 py-1.5 text-sm text-muted-foreground">
+                                        Chưa có agent nào đang làm việc.
+                                    </p>
+                                ) : (
+                                    <ul className="flex flex-col gap-1">
+                                        {agents.map((agent) => (
+                                            <li
+                                                key={agent.id}
+                                                className="flex flex-col gap-0.5 rounded-lg px-2 py-1.5 text-sm"
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <span
+                                                        aria-hidden="true"
+                                                        className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
+                                                    />
+                                                    <span className="truncate font-medium">
+                                                        {agent.name}
+                                                    </span>
+                                                    <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
+                                                        {Math.max(
+                                                            0,
+                                                            Math.floor(
+                                                                (now -
+                                                                    agent.startedAt) /
+                                                                    1000,
+                                                            ),
+                                                        )}
+                                                        s
+                                                    </span>
+                                                </span>
+                                                <span className="truncate text-xs text-muted-foreground">
+                                                    {agent.step}
+                                                </span>
+                                                <span className="truncate text-xs text-muted-foreground/80">
+                                                    {agent.task}
+                                                </span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </PopoverContent>
+                        </Popover>
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                                 <Button

@@ -68,8 +68,12 @@ const LANGUAGES: Record<string, string> = {
     php: 'php',
     js: 'javascript',
     jsx: 'javascript',
+    mjs: 'javascript',
+    cjs: 'javascript',
     ts: 'typescript',
     tsx: 'typescript',
+    mts: 'typescript',
+    cts: 'typescript',
     json: 'json',
     css: 'css',
     scss: 'scss',
@@ -92,11 +96,43 @@ const LANGUAGES: Record<string, string> = {
     cpp: 'cpp',
     cs: 'csharp',
     ini: 'ini',
+    mk: 'shell',
+    conf: 'ini',
+    properties: 'ini',
     toml: 'ini',
 };
 
+// * Config files named by their whole name (no extension, or a dotfile): `.prettierrc` is JSON, `.env` and `.editorconfig` are ini-like; ignore files and Makefiles borrow the shell colours (`#` comments, strings, variables).
+const FILE_NAMES: Record<string, string> = {
+    '.prettierrc': 'json',
+    '.eslintrc': 'json',
+    '.babelrc': 'json',
+    '.stylelintrc': 'json',
+    '.swcrc': 'json',
+    '.editorconfig': 'ini',
+    '.npmrc': 'ini',
+    '.gitconfig': 'ini',
+    '.gitattributes': 'ini',
+    '.gitmodules': 'ini',
+    '.gitignore': 'shell',
+    '.dockerignore': 'shell',
+    '.npmignore': 'shell',
+    '.env': 'ini',
+    dockerfile: 'dockerfile',
+    makefile: 'shell',
+    gnumakefile: 'shell',
+    'composer.lock': 'json',
+};
+
 export function languageOf(path: string): string {
-    return LANGUAGES[path.split('.').pop()?.toLowerCase() ?? ''] ?? 'plaintext';
+    const name = path.split('/').pop()?.toLowerCase() ?? '';
+
+    return (
+        FILE_NAMES[name] ??
+        (name.startsWith('.env.') ? 'ini' : undefined) ??
+        LANGUAGES[name.split('.').pop() ?? ''] ??
+        'plaintext'
+    );
 }
 
 /** * Light/dark theme name following the page's own theme. */
@@ -112,6 +148,9 @@ export const READ_ONLY_OPTIONS = {
     domReadOnly: true,
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
+    // * Long lines continue on the next row instead of running off the (narrow) column.
+    wordWrap: 'on',
+    wrappingIndent: 'same',
     fontSize: 13,
     lineHeight: 21,
     fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",

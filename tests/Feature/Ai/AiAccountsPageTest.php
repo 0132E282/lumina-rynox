@@ -41,6 +41,73 @@ class AiAccountsPageTest extends AiTestCase
         $this->assertStringNotContainsString(self::SECRET, $response->getContent());
     }
 
+    public function test_an_account_without_a_name_gets_a_generated_one_and_duplicates_a_suffix(): void
+    {
+        $admin = $this->admin();
+        $payload = $this->payload();
+        unset($payload['name'], $payload['purposes']);
+
+        $this->actingAs($admin)->post(route('integrations.ai.accounts.store'), $payload)->assertRedirect();
+        $this->post(route('integrations.ai.accounts.store'), $payload)->assertRedirect();
+        $this->post(route('integrations.ai.accounts.store'), [...$payload, 'vendor' => 'openai', 'auth_type' => 'session_token', 'token' => ''])->assertRedirect();
+
+        $this->assertSame(['Claude · API token', 'Claude · API token 2', 'OpenAI / Codex · Session token'], AiAccount::query()->orderBy('id')->pluck('name')->all());
+        $this->assertNull(AiAccount::query()->firstOrFail()->purposes);
+    }
+
+    public function test_an_old_payload_with_a_name_still_works_and_a_long_one_is_refused(): void
+    {
+        $admin = $this->admin();
+
+        $this->actingAs($admin)->post(route('integrations.ai.accounts.store'), $this->payload(['name' => 'Tên cũ']))->assertRedirect();
+        $this->assertSame('Tên cũ', AiAccount::query()->firstOrFail()->name);
+
+        $this->postJson(route('integrations.ai.accounts.store'), $this->payload(['name' => str_repeat('a', 101)]))->assertStatus(422)->assertJsonValidationErrors('name');
+    }
+
+    public function test_editing_without_name_or_purposes_keeps_the_saved_ones(): void
+    {
+        $account = $this->account(['name' => 'Giữ nguyên', 'purposes' => ['report']]);
+        $payload = $this->payload(['token' => '', 'priority' => 5]);
+        unset($payload['name'], $payload['purposes']);
+
+        $this->actingAs($this->admin())->put(route('integrations.ai.accounts.update', $account), $payload)->assertRedirect();
+
+        $this->assertSame('Giữ nguyên', $account->fresh()->name);
+        $this->assertSame(['report'], $account->fresh()->purposes);
+        $this->assertSame(5, $account->fresh()->priority);
+
+        $this->put(route('integrations.ai.accounts.update', $account), $this->payload(['token' => '', 'purposes' => ['nope']]))->assertSessionHasErrors('purposes.0');
+    }
+
+    public function test_a_new_account_without_model_or_priority_gets_the_defaults(): void
+    {
+        $payload = $this->payload();
+        unset($payload['model'], $payload['priority']);
+
+        $this->actingAs($this->admin())->post(route('integrations.ai.accounts.store'), $payload)->assertRedirect();
+
+        $account = AiAccount::query()->firstOrFail();
+        $this->assertNull($account->model);
+        $this->assertSame(100, $account->priority);
+    }
+
+    public function test_editing_without_model_or_priority_keeps_the_saved_ones_but_sent_values_still_apply(): void
+    {
+        $account = $this->account(['model' => 'claude-haiku-4-5', 'priority' => 7]);
+        $payload = $this->payload(['token' => '']);
+        unset($payload['model'], $payload['priority']);
+
+        $this->actingAs($this->admin())->put(route('integrations.ai.accounts.update', $account), $payload)->assertRedirect();
+        $this->assertSame('claude-haiku-4-5', $account->fresh()->model);
+        $this->assertSame(7, $account->fresh()->priority);
+
+        $this->putJson(route('integrations.ai.accounts.update', $account), $this->payload(['token' => '', 'priority' => 2000]))->assertStatus(422)->assertJsonValidationErrors('priority');
+        $this->put(route('integrations.ai.accounts.update', $account), $this->payload(['token' => '', 'model' => 'gpt-5', 'priority' => 3]))->assertRedirect();
+        $this->assertSame('gpt-5', $account->fresh()->model);
+        $this->assertSame(3, $account->fresh()->priority);
+    }
+
     public function test_edit_keeps_the_token_when_blank_and_replaces_it_when_given(): void
     {
         $account = $this->account();

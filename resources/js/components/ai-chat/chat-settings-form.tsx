@@ -1,5 +1,11 @@
 import { isAxiosError } from 'axios';
-import { SlidersHorizontal, UserRound } from 'lucide-react';
+import {
+    Bot,
+    Plug,
+    SlidersHorizontal,
+    Sparkles,
+    UserRound,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useState } from 'react';
 import { FormProvider } from 'react-hook-form';
@@ -8,6 +14,7 @@ import { toast } from 'sonner';
 import { router } from '@inertiajs/react';
 import { settings as aiSettingsRoute } from '@/actions/App/Http/Controllers/AiAccountController';
 import { ChatSettingsAdvanced } from '@/components/ai-chat/chat-settings-advanced';
+import { ChatSettingsTools } from '@/components/ai-chat/chat-settings-tools';
 import { ChatSettingsPersona } from '@/components/ai-chat/chat-settings-persona';
 import type { PersonaErrors } from '@/components/ai-chat/chat-settings-persona';
 import { Button } from '@/components/ui/button';
@@ -23,7 +30,7 @@ import type {
     AiChatSettings,
 } from '@/types';
 
-type TabKey = 'persona' | 'advanced';
+type TabKey = 'persona' | 'advanced' | 'skill' | 'agent' | 'mcp';
 
 type TextFields = {
     custom_instructions: string;
@@ -58,6 +65,7 @@ export function ChatSettingsForm({
     selection,
     onSelectionChange,
     vendor,
+    projects,
     onSaved,
     onClose,
 }: {
@@ -69,6 +77,8 @@ export function ChatSettingsForm({
     selection: AiChatSelection;
     onSelectionChange: (selection: AiChatSelection) => void;
     vendor?: { key: string; name: string };
+    /** Projects picked in the composer: what Skill/Agent/MCP are switched for. */
+    projects: string[];
     onSaved: (settings: AiChatSettings) => void;
     onClose: () => void;
 }) {
@@ -270,6 +280,29 @@ export function ChatSettingsForm({
                 />
             ),
         },
+        ...(
+            [
+                ['skill', 'Skill', 'Skill của dự án', Sparkles],
+                ['agent', 'Agent', 'Subagent', Bot],
+                ['mcp', 'MCP', 'MCP server', Plug],
+            ] as const
+        ).map(([key, label, title, icon]) => ({
+            key,
+            label,
+            title,
+            icon,
+            failed: false,
+            content: (
+                <ChatSettingsTools
+                    kind={key}
+                    projects={projects}
+                    aiCount={
+                        new Set(aiAccounts.map((account) => account.vendor_key))
+                            .size
+                    }
+                />
+            ),
+        })),
     ];
     const activeSection =
         sections.find((section) => section.key === tab) ?? sections[0];

@@ -5,7 +5,7 @@ export type AiCommand = {
 };
 
 // * Ready-made prompt templates: picking one only fills the composer; the person edits and sends it. They run with any AI.
-export const AI_COMMANDS: AiCommand[] = [
+const AI_COMMANDS: AiCommand[] = [
     {
         name: 'review',
         description: 'Review code: lỗi, bảo mật, hiệu năng',

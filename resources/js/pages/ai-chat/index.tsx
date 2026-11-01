@@ -16,6 +16,7 @@ import { ActivityTerminal } from '@/components/ai-chat/activity-terminal';
 import type { ActivityEntry } from '@/components/ai-chat/activity-terminal';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { AiUsageDialog } from '@/components/ai-chat/ai-usage-dialog';
+import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
 import { ChatSettingsDialog } from '@/components/ai-chat/chat-settings-dialog';
 import { ChatComposer } from '@/components/ai-chat/chat-composer';
 import { CodeViewer } from '@/components/ai-chat/code-viewer';
@@ -25,7 +26,6 @@ import { FileViewer } from '@/components/ai-chat/file-viewer';
 import { SidePanel } from '@/components/ai-chat/side-panel';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { SessionPanel } from '@/components/ai-chat/session-panel';
-import { LocalSourceMenu } from '@/components/ai-chat/local-source-menu';
 import { RecentsList } from '@/components/ai-chat/recents-list';
 import type { RecentsTab } from '@/components/ai-chat/recents-list';
 import { Button } from '@/components/ui/button';
@@ -41,13 +41,19 @@ import type { ViewerFile } from '@/lib/viewer-file';
 import { useResizableWidth } from '@/hooks/use-resizable-width';
 import { aiErrorMessage } from '@/lib/ai-error';
 import { api } from '@/lib/api';
-import { readAiChatCache, writeAiChatCache } from '@/lib/ai-chat-cache';
+import {
+    invalidateAiChatCache,
+    readAiChatCache,
+    setAiChatCacheScope,
+    writeAiChatCache,
+} from '@/lib/ai-chat-cache';
 import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
 import { cn } from '@/lib/utils';
 import { home } from '@/routes';
 import type {
     Auth,
     AiChatAccount,
+    AiAgentRun,
     AiChatConversation,
     AiChatMessage,
     AiChatMode,
@@ -60,10 +66,6 @@ import type {
 
 // * Same cap as `SendAiChatMessageRequest::MAX_MESSAGE_LENGTH`.
 const MAX_MESSAGE_LENGTH = 2000;
-
-// * Sample prompt the code viewer's "Review" button drops into the draft; the user edits it and sends it.
-const REVIEW_PROMPT =
-    'tìm lỗi logic, bảo mật, hiệu năng và đề xuất cách sửa cụ thể: ';
 
 const MODE_KEY = 'ai-chat:mode';
 
@@ -115,8 +117,6 @@ type SessionState = { items: ThreadItem[] };
 const INFO_OPEN_KEY = 'ai-chat.info-open';
 const RECENTS_TAB_KEY = 'ai-chat.recents-tab';
 
-type AiChatMention = { path: string; n: number; review?: boolean };
-
 // * Same limits as `SendAiChatMessageRequest` / `ChatAttachmentReader::extensions()`.
 const MAX_ATTACHMENTS = 5;
 const ATTACHMENT_EXTENSIONS = [
@@ -165,7 +165,12 @@ function ChatPanel({
     githubConnected,
     repo,
     onRepoChange,
-    mention,
+    agents,
+    onAgentStart,
+    onAgentStep,
+    onAgentEnd,
+    extraRepos,
+    onExtraReposChange: setExtraRepos,
     onLog,
     onChanges,
     onSession,
@@ -181,8 +186,13 @@ function ChatPanel({
     githubConnected: boolean;
     repo: string | null;
     onRepoChange: (repo: string | null) => void;
-    /** * A file the person asked the AI to read from the code viewer; each request has a new `n`. */
-    mention: AiChatMention | null;
+    /** * Agents working right now across every chat of this page. */
+    agents: AiAgentRun[];
+    onAgentStart: (run: Omit<AiAgentRun, 'id' | 'startedAt'>) => number;
+    onAgentStep: (id: number, step: string) => void;
+    onAgentEnd: (id: number) => void;
+    extraRepos: string[];
+    onExtraReposChange: (extras: string[]) => void;
     /** * Adds a line to the read-only activity terminal. */
     onLog: (level: ActivityEntry['level'], text: string) => void;
     /** * The files the AI proposed to change in this conversation, for the code viewer. */
@@ -213,23 +223,6 @@ function ChatPanel({
     });
     // * The draft as it was before "Tối ưu", so the rewrite can be undone.
     const [previousDraft, setPreviousDraft] = useState<string | null>(null);
-    // * The code viewer's "Nhờ AI đọc tệp này" appends a line to the draft (a request made before this chat opened is ignored).
-    const handledMention = useRef(mention?.n ?? 0);
-
-    useEffect(() => {
-        if (mention === null || mention.n === handledMention.current) {
-            return;
-        }
-
-        handledMention.current = mention.n;
-        setDraft((current) =>
-            `${current}${current === '' || current.endsWith('\n') ? '' : '\n'}${mention.review ? `Review tệp ${mention.path}: ${REVIEW_PROMPT}` : `Đọc tệp ${mention.path}: `}`.slice(
-                0,
-                MAX_MESSAGE_LENGTH,
-            ),
-        );
-    }, [mention]);
-
     useEffect(() => {
         onChanges(items.flatMap((item) => item.proposals ?? []));
     }, [items, onChanges]);
@@ -265,6 +258,13 @@ function ChatPanel({
         }
 
         setSending(true);
+        const agentId = onAgentStart({
+            name:
+                aiAccounts.find((item) => item.id === selection.accountId)
+                    ?.name ?? 'AI mặc định',
+            step: 'Đang gửi yêu cầu',
+            task: text.slice(0, 60),
+        });
         setItems((current) => [
             ...current.filter((item) => item.role !== 'error'),
             {
@@ -295,6 +295,16 @@ function ChatPanel({
                 form.append('mode', mode);
             }
 
+            // * Projects picked together with the main one: ids only, read as context.
+            (repo === null ? [] : extraRepos).forEach((extra) =>
+                form.append(
+                    extra.startsWith('local:')
+                        ? 'extra_local_roots[]'
+                        : 'extra_repos[]',
+                    extra.startsWith('local:') ? extra.slice(6) : extra,
+                ),
+            );
+
             if (repo !== null && repo.startsWith('local:')) {
                 // * A folder of this machine: the client names a root id only, never a path.
                 form.append('local_root', repo.slice(6));
@@ -314,15 +324,21 @@ function ChatPanel({
                 `Gửi tin nhắn · ${account?.name ?? 'AI mặc định'}${selection.model ? ` · ${selection.model}` : ''}${repo ? ` · repo ${repo}` : ''}${sentFiles.length > 0 ? ` · ${sentFiles.length} tệp` : ''}`,
             );
 
+            onAgentStep(agentId, 'Đang đọc ngữ cảnh và trả lời');
+
             const { data } = await api.post<AiChatSendResponse>(
                 send.url(),
                 form,
             );
 
+            onAgentStep(agentId, 'Đang xử lý câu trả lời');
+
             const proposals = data.assistant_message.proposals ?? [];
             const pull = proposals.find((proposal) => proposal.pull_url);
 
             onLog('ok', 'AI đã trả lời.');
+            // * A call was just made: the usage stats are out of date.
+            invalidateAiChatCache('usage');
 
             if (proposals.length > 0) {
                 onLog('info', `AI đề xuất sửa ${proposals.length} tệp.`);
@@ -390,6 +406,7 @@ function ChatPanel({
             ]);
         } finally {
             setSending(false);
+            onAgentEnd(agentId);
         }
     };
 
@@ -438,6 +455,7 @@ function ChatPanel({
                 onChange={setDraft}
                 onSubmit={() => void submit()}
                 sending={sending}
+                agents={agents}
                 maxLength={MAX_MESSAGE_LENGTH}
                 autoFocus
                 accounts={aiAccounts}
@@ -449,6 +467,8 @@ function ChatPanel({
                 maxFiles={MAX_ATTACHMENTS}
                 repo={repo}
                 onRepoChange={onRepoChange}
+                extraRepos={extraRepos}
+                onExtraReposChange={setExtraRepos}
                 githubConnected={githubConnected}
                 mode={mode}
                 onModeChange={onModeChange}
@@ -480,10 +500,22 @@ function ChatPanel({
         return (
             <div className="flex min-h-0 flex-1">
                 <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                    <div className="flex flex-1 items-center justify-center px-4">
+                    <div className="flex flex-1 flex-col items-center justify-center gap-4 px-4">
+                        {/* * The character the person set up (avatar + name, see "Cài đặt nhân vật") introduces itself. */}
+                        <AssistantAvatar
+                            {...assistant}
+                            className="size-20 rounded-full text-2xl"
+                        />
                         <h1 className="text-center text-2xl font-semibold">
-                            Hôm nay bạn muốn làm gì?
+                            Hi {authUser.name}, hôm nay bạn muốn làm gì?
                         </h1>
+                        <p className="max-w-md text-center text-sm text-muted-foreground">
+                            {assistant.name
+                                ? `Mình là ${assistant.name}, trợ lý AI của bạn.`
+                                : 'Mình là trợ lý AI của bạn.'}{' '}
+                            Mình có thể trả lời, soạn nội dung, đọc tệp và repo
+                            GitHub.
+                        </p>
                     </div>
                     <div className="mx-auto w-full max-w-3xl px-4 pt-2 pb-[max(1rem,env(safe-area-inset-bottom))]">
                         {composer}
@@ -532,6 +564,8 @@ export default function AiChatIndex({
 }: AiChatPageProps) {
     const authUser = usePage<{ auth: Auth }>().props.auth.user;
     const userId = authUser.id;
+    // * Memory caches (usage stats, local roots, GitHub data) belong to this person only.
+    setAiChatCacheScope(userId);
     const [session, setSession] = useState<SessionState>({
         items: messages,
     });
@@ -702,12 +736,66 @@ export default function AiChatIndex({
     }, []);
     // * The repo and its code viewer belong to the page. Only the Code tab has a repo: in the Chat tab no repo is sent, even if one was picked earlier.
     const [selectedRepo, setRepo] = useState<string | null>(null);
+    // * Further projects picked together with the main one; they belong to the page so a pick from the sidebar can set them.
+    const [extraRepos, setExtraRepos] = useState<string[]>([]);
+    // * Which of the picked projects the code viewer shows (the main one unless the person switched).
+    const [viewedRepo, setViewedRepo] = useState<string | null>(null);
+    const selectedRepoRef = useRef(selectedRepo);
+
+    selectedRepoRef.current = selectedRepo;
     const repo = recentsTab === 'projects' ? selectedRepo : null;
+    const viewed =
+        repo !== null && viewedRepo !== null && extraRepos.includes(viewedRepo)
+            ? viewedRepo
+            : repo;
     const [codeOpen, setCodeOpen] = useState(false);
     const [changes, setChanges] = useState<AiChatProposal[]>([]);
     const [terminalOpen, setTerminalOpen] = useState(false);
+    const terminalWidth = useResizableWidth(
+        'ai-chat.width.terminal',
+        360,
+        260,
+        640,
+    );
+    const [terminalDragging, setTerminalDragging] = useState(false);
     const terminalVisible = recentsTab === 'projects';
+    const [agents, setAgents] = useState<AiAgentRun[]>([]);
+    const nextAgentId = useRef(0);
+    const startAgent = useCallback(
+        (run: Omit<AiAgentRun, 'id' | 'startedAt'>) => {
+            const id = ++nextAgentId.current;
+
+            setAgents((current) => [
+                ...current,
+                { ...run, id, startedAt: Date.now() },
+            ]);
+
+            return id;
+        },
+        [],
+    );
+    const stepAgent = useCallback(
+        (id: number, step: string) =>
+            setAgents((current) =>
+                current.map((agent) =>
+                    agent.id === id ? { ...agent, step } : agent,
+                ),
+            ),
+        [],
+    );
+    const endAgent = useCallback(
+        (id: number) =>
+            setAgents((current) => current.filter((agent) => agent.id !== id)),
+        [],
+    );
     const [log, setLog] = useState<ActivityEntry[]>([]);
+    const terminal = (
+        <ActivityTerminal
+            entries={log}
+            onClear={() => setLog([])}
+            onClose={() => setTerminalOpen(false)}
+        />
+    );
     const nextLogId = useRef(0);
     const addLog = useCallback(
         (level: ActivityEntry['level'], text: string) =>
@@ -724,7 +812,6 @@ export default function AiChatIndex({
             ),
         [],
     );
-    const [mention, setMention] = useState<AiChatMention | null>(null);
     // * Stale-while-revalidate: remember the open conversation, and while another one loads from the server show its remembered messages.
     const [opening, setOpening] = useState<string | null>(null);
 
@@ -769,14 +856,21 @@ export default function AiChatIndex({
 
     useEffect(() => {
         if (activeRepo !== null) {
+            // * A chat just created for the picked project keeps the extras; opening a chat of another project drops them.
+            if (activeRepo !== selectedRepoRef.current) {
+                setExtraRepos([]);
+            }
+
             setRepo(activeRepo);
             setRecentsTab('projects');
         }
     }, [activeRepo, activeId, setRecentsTab]);
 
     const selectRepo = useCallback(
-        (name: string) => {
+        (name: string, extras: string[] = []) => {
             setRepo(name);
+            setExtraRepos(extras);
+            setViewedRepo(null);
             setRecentsTab('projects');
             setCodeOpen(true);
             addLog('info', `Chọn repo ${name}`);
@@ -839,6 +933,7 @@ export default function AiChatIndex({
                 aiAccounts={aiAccounts}
                 selection={selection}
                 onSelectionChange={setSelection}
+                projects={selectedRepo === null ? [] : [selectedRepo]}
                 vendor={
                     pickedAccount
                         ? {
@@ -879,7 +974,7 @@ export default function AiChatIndex({
 
                 <section
                     aria-label="Trò chuyện với trợ lý AI"
-                    className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+                    className="relative flex min-h-0 min-w-[22rem] flex-1 flex-col"
                 >
                     <div
                         className={cn(
@@ -973,9 +1068,6 @@ export default function AiChatIndex({
                                     <Terminal aria-hidden="true" />
                                 </Button>
                             )}
-                            <LocalSourceMenu
-                                onSelect={(id) => selectRepo(`local:${id}`)}
-                            />
                             {repo !== null && (
                                 <>
                                     {!repo.startsWith('local:') && (
@@ -1045,6 +1137,8 @@ export default function AiChatIndex({
                             aiAccounts={aiAccounts}
                             githubConnected={githubConnected}
                             repo={repo}
+                            extraRepos={extraRepos}
+                            onExtraReposChange={setExtraRepos}
                             onRepoChange={(name) => {
                                 setRepo(name);
 
@@ -1052,7 +1146,10 @@ export default function AiChatIndex({
                                     setCodeOpen(false);
                                 }
                             }}
-                            mention={mention}
+                            agents={agents}
+                            onAgentStart={startAgent}
+                            onAgentStep={stepAgent}
+                            onAgentEnd={endAgent}
                             onLog={addLog}
                             onChanges={setChanges}
                             onSession={setSession}
@@ -1061,13 +1158,6 @@ export default function AiChatIndex({
                             mode={mode}
                             onModeChange={changeMode}
                             settings={settings}
-                        />
-                    )}
-                    {terminalOpen && terminalVisible && (
-                        <ActivityTerminal
-                            entries={log}
-                            onClear={() => setLog([])}
-                            onClose={() => setTerminalOpen(false)}
                         />
                     )}
                 </section>
@@ -1081,7 +1171,7 @@ export default function AiChatIndex({
                         }
                         dragging={viewerDragging}
                         label="Xem tệp"
-                        maxWidthClass="max-w-[70%]"
+                        maxWidthClass="max-w-[min(70%,calc(100%-40rem))]"
                         panelRef={viewerPanel}
                         onKeyDown={(event) => {
                             if (event.key === 'Escape') {
@@ -1168,6 +1258,50 @@ export default function AiChatIndex({
                         {infoPanel}
                     </SidePanel>
                 )}
+                {wide && terminalVisible && (
+                    <SidePanel
+                        open={terminalOpen}
+                        width={terminalWidth.width}
+                        dragging={terminalDragging}
+                        label="Terminal"
+                        maxWidthClass="max-w-[40%]"
+                    >
+                        <ResizeHandle
+                            label="Đổi độ rộng terminal"
+                            className="translate-x-0"
+                            {...terminalWidth.handleProps}
+                            onPointerDown={(event) => {
+                                setTerminalDragging(true);
+                                terminalWidth.handleProps.onPointerDown(event);
+                            }}
+                            onPointerUp={() => {
+                                setTerminalDragging(false);
+                                terminalWidth.handleProps.onPointerUp();
+                            }}
+                            onPointerCancel={() => {
+                                setTerminalDragging(false);
+                                terminalWidth.handleProps.onPointerCancel();
+                            }}
+                        />
+                        {terminal}
+                    </SidePanel>
+                )}
+                {!wide && terminalVisible && (
+                    <Sheet open={terminalOpen} onOpenChange={setTerminalOpen}>
+                        <SheetContent
+                            side="right"
+                            className="w-full p-0 sm:max-w-md"
+                        >
+                            <SheetTitle className="sr-only">
+                                Terminal
+                            </SheetTitle>
+                            <SheetDescription className="sr-only">
+                                Nhật ký hoạt động của trang chat.
+                            </SheetDescription>
+                            {terminal}
+                        </SheetContent>
+                    </Sheet>
+                )}
                 {!wide && !viewerFile && (
                     <Sheet open={infoOpen} onOpenChange={toggleInfo}>
                         <SheetContent side="right" className="w-80 p-0">
@@ -1184,22 +1318,12 @@ export default function AiChatIndex({
                 )}
                 {codeOpen && repo !== null && (
                     <CodeViewer
-                        repo={repo}
+                        // * A new project starts with its own tree, open folders and file.
+                        key={viewed}
+                        repo={viewed ?? repo}
+                        repos={[repo, ...extraRepos]}
+                        onViewRepo={setViewedRepo}
                         changes={changes}
-                        onClose={() => setCodeOpen(false)}
-                        onMention={(path) =>
-                            setMention((current) => ({
-                                path,
-                                n: (current?.n ?? 0) + 1,
-                            }))
-                        }
-                        onReview={(path) =>
-                            setMention((current) => ({
-                                path,
-                                n: (current?.n ?? 0) + 1,
-                                review: true,
-                            }))
-                        }
                     />
                 )}
             </div>

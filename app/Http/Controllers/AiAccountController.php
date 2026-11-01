@@ -13,6 +13,7 @@ use App\Services\Ai\CliLogin;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -29,7 +30,10 @@ class AiAccountController extends Controller
         $this->ensureSupported($validated['vendor'], $validated['auth_type']);
 
         AiAccount::query()->create([
+            'model' => null,
+            'priority' => 100,
             ...$this->attributes($validated),
+            'name' => $this->nameFor($validated),
             'credentials' => filled($validated['token'] ?? null) ? ['token' => $validated['token']] : null,
             'status' => Integration::STATUS_CONNECTED,
         ]);
@@ -43,6 +47,11 @@ class AiAccountController extends Controller
         $this->ensureSupported($validated['vendor'], $validated['auth_type']);
 
         $account->fill($this->attributes($validated));
+
+        // * A blank or missing name keeps the saved one.
+        if (filled($validated['name'] ?? null)) {
+            $account->name = $validated['name'];
+        }
 
         if (filled($validated['token'] ?? null)) {
             $account->credentials = ['token' => $validated['token']];
@@ -155,7 +164,8 @@ class AiAccountController extends Controller
     private function validated(Request $request, ?AiAccount $account): array
     {
         return $request->validate([
-            'name' => ['required', 'string', 'max:100'],
+            // * The name is optional: a new account gets a generated one, an old client may still send its own.
+            'name' => ['nullable', 'string', 'max:100'],
             'vendor' => ['required', Rule::in(array_keys(AiAccount::VENDORS))],
             'auth_type' => ['required', Rule::in(array_keys(AiAccount::AUTH_TYPES))],
             // * A CLI session account may leave the token blank: the CLI then uses the login of this machine (`claude login`).
@@ -163,7 +173,7 @@ class AiAccountController extends Controller
             'model' => ['nullable', 'string', 'max:100', 'regex:/^[A-Za-z0-9][A-Za-z0-9._:-]*$/'],
             'purposes' => ['nullable', 'array'],
             'purposes.*' => ['string', 'distinct', Rule::in(array_keys(AiAccount::PURPOSES))],
-            'priority' => ['required', 'integer', 'min:0', 'max:1000'],
+            'priority' => ['nullable', 'integer', 'min:0', 'max:1000'],
         ]);
     }
 
@@ -173,17 +183,50 @@ class AiAccountController extends Controller
      */
     private function attributes(array $validated): array
     {
-        $purposes = array_values($validated['purposes'] ?? []);
-
-        return [
-            'name' => $validated['name'],
+        $attributes = [
             'vendor' => $validated['vendor'],
             'auth_type' => $validated['auth_type'],
-            'model' => filled($validated['model'] ?? null) ? $validated['model'] : null,
-            // * Every purpose ticked (or none) is stored as null = "all", so a purpose added later is covered.
-            'purposes' => $purposes === [] || count($purposes) === count(AiAccount::PURPOSES) ? null : $purposes,
-            'priority' => (int) $validated['priority'],
         ];
+
+        // * The dialog no longer sends the model or the priority: a new account gets the provider default and 100 (see `store`), an edit leaves the saved values alone.
+        if (array_key_exists('model', $validated)) {
+            $attributes['model'] = filled($validated['model']) ? $validated['model'] : null;
+        }
+
+        if (filled($validated['priority'] ?? null)) {
+            $attributes['priority'] = (int) $validated['priority'];
+        }
+
+        // * The dialog no longer sends purposes: a new account then serves all of them (null) and an edit leaves the saved ones alone.
+        if (array_key_exists('purposes', $validated)) {
+            $purposes = array_values($validated['purposes'] ?? []);
+            // * Every purpose ticked (or none) is stored as null = "all", so a purpose added later is covered.
+            $attributes['purposes'] = $purposes === [] || count($purposes) === count(AiAccount::PURPOSES) ? null : $purposes;
+        }
+
+        return $attributes;
+    }
+
+    /**
+     * The name of a new account: the one sent, else the provider and token type ("OpenAI / Codex · Session token"), with a numeric suffix when taken.
+     * ! Built from the form's own choices only: no credential file, token or config is read to find an identity.
+     *
+     * @param  array<string, mixed>  $validated
+     */
+    private function nameFor(array $validated): string
+    {
+        if (filled($validated['name'] ?? null)) {
+            return $validated['name'];
+        }
+
+        $base = Str::before(AiAccount::VENDORS[$validated['vendor']], ' (').' · '.Str::before(AiAccount::AUTH_TYPES[$validated['auth_type']], ' (');
+        $name = $base;
+
+        for ($number = 2; AiAccount::query()->where('name', $name)->exists(); $number++) {
+            $name = "{$base} {$number}";
+        }
+
+        return $name;
     }
 
     // * DeepSeek has no CLI, so a session token for it could never be used.

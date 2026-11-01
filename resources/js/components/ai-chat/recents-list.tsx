@@ -1,4 +1,5 @@
 import { Link, usePage } from '@inertiajs/react';
+import { vendorShortName } from '@/lib/ai-account';
 import {
     ChartColumn,
     MessageSquare,
@@ -26,6 +27,7 @@ import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { Input } from '@/components/ui/input';
 import type { NavigationConfig } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
+import { groupByDay } from '@/lib/relative-time';
 import type { AiChatAccount, AiChatConversation } from '@/types';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -63,7 +65,7 @@ export const RecentsList = memo(function RecentsList({
     onNavigate?: () => void;
     onCollapse?: () => void;
     repo: string | null;
-    onSelectRepo: (repo: string) => void;
+    onSelectRepo: (repo: string, extras?: string[]) => void;
     githubConnected: boolean;
     /** * Active tab, owned by the page (the Terminal only shows on "projects"). */
     tab: RecentsTab;
@@ -142,17 +144,6 @@ export const RecentsList = memo(function RecentsList({
                     )}
                 </div>
             </div>
-            <Button
-                asChild
-                variant="outline"
-                className="justify-start"
-                onClick={onNavigate}
-            >
-                <Link href={home.url()}>
-                    <SquarePen aria-hidden="true" />
-                    Cuộc trò chuyện mới
-                </Link>
-            </Button>
             <div
                 role="tablist"
                 aria-label="Chat và dự án"
@@ -269,8 +260,8 @@ export const RecentsList = memo(function RecentsList({
                 {tab === 'projects' ? (
                     <ProjectsTab
                         repo={repo}
-                        onSelect={(name) => {
-                            onSelectRepo(name);
+                        onSelect={(name, extras) => {
+                            onSelectRepo(name, extras);
                             onNavigate?.();
                         }}
                         connected={githubConnected}
@@ -280,39 +271,72 @@ export const RecentsList = memo(function RecentsList({
                     />
                 ) : (
                     <>
-                        <h2 className="px-2 text-xs font-medium text-muted-foreground">
-                            Gần đây
-                        </h2>
+                        <Button
+                            asChild
+                            variant="outline"
+                            className="justify-start"
+                            onClick={onNavigate}
+                        >
+                            <Link href={home.url()}>
+                                <SquarePen aria-hidden="true" />
+                                Cuộc trò chuyện mới
+                            </Link>
+                        </Button>
                         {scoped.length === 0 ? (
-                            <p className="px-2 text-sm text-muted-foreground">
-                                Chưa có cuộc trò chuyện nào.
-                            </p>
+                            <>
+                                <h2 className="px-2 text-sm font-medium text-foreground/70">
+                                    Gần đây
+                                </h2>
+                                <p className="px-2 text-sm text-muted-foreground">
+                                    Chưa có cuộc trò chuyện nào.
+                                </p>
+                            </>
                         ) : (
-                            <ul className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
-                                {scoped.map((conversation) => (
-                                    <li key={conversation.id}>
-                                        <Link
-                                            href={home.url({
-                                                query: { c: conversation.id },
-                                            })}
-                                            {...OPEN_CONVERSATION_VISIT}
-                                            onClick={onNavigate}
-                                            aria-current={
-                                                conversation.id === activeId
-                                                    ? 'page'
-                                                    : undefined
-                                            }
-                                            className={cn(
-                                                'block truncate rounded-sm px-2 py-2 text-sm transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
-                                                conversation.id === activeId &&
-                                                    'bg-accent text-accent-foreground',
-                                            )}
-                                        >
-                                            {conversation.title}
-                                        </Link>
-                                    </li>
+                            <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
+                                {groupByDay(
+                                    scoped,
+                                    (conversation) => conversation.updated_at,
+                                ).map((group) => (
+                                    <section
+                                        key={group.label}
+                                        aria-label={group.label}
+                                        className="flex flex-col gap-0.5"
+                                    >
+                                        <h2 className="px-2 pb-1 text-sm font-medium text-foreground/70">
+                                            {group.label}
+                                        </h2>
+                                        <ul className="flex flex-col gap-0.5">
+                                            {group.items.map((conversation) => (
+                                                <li key={conversation.id}>
+                                                    <Link
+                                                        href={home.url({
+                                                            query: {
+                                                                c: conversation.id,
+                                                            },
+                                                        })}
+                                                        {...OPEN_CONVERSATION_VISIT}
+                                                        onClick={onNavigate}
+                                                        aria-current={
+                                                            conversation.id ===
+                                                            activeId
+                                                                ? 'page'
+                                                                : undefined
+                                                        }
+                                                        className={cn(
+                                                            'block truncate rounded-sm px-2 py-2 text-sm font-medium transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
+                                                            conversation.id ===
+                                                                activeId &&
+                                                                'bg-accent text-accent-foreground',
+                                                        )}
+                                                    >
+                                                        {conversation.title}
+                                                    </Link>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </section>
                                 ))}
-                            </ul>
+                            </div>
                         )}
                     </>
                 )}
@@ -336,7 +360,7 @@ export const RecentsList = memo(function RecentsList({
                                 <span className="block truncate text-xs text-muted-foreground">
                                     {[
                                         account.name,
-                                        account.vendor.split(' (')[0],
+                                        vendorShortName(account.vendor),
                                     ].join(' · ')}
                                 </span>
                             )}

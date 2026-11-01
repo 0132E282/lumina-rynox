@@ -1,175 +1,144 @@
-import { Link } from '@inertiajs/react';
-import { Check, Github, Lock } from 'lucide-react';
-import { useState } from 'react';
+import { Plus } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { repos as reposRoute } from '@/actions/App/Http/Controllers/AiChatController';
-import { Button } from '@/components/ui/button';
 import {
-    DropdownMenu,
-    DropdownMenuCheckboxItem,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { Input } from '@/components/ui/input';
+    LocalProjectDialog,
+    localUnavailableReason,
+} from '@/components/ai-chat/local-project-dialog';
+import type {
+    LocalProject,
+    LocalProjectsChange,
+    LocalRoot,
+} from '@/components/ai-chat/local-project-dialog';
+import { SourceIcon } from '@/components/ai-chat/source-icon';
+import { Button } from '@/components/ui/button';
+import { useCachedRequest } from '@/hooks/use-cached-request';
 import { api } from '@/lib/api';
-import { cachedRequest } from '@/lib/ai-chat-cache';
-import { requestErrorMessage } from '@/lib/ai-error';
+import { cachedRequest, invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import type { AiChatRepo } from '@/types';
 
-/** * GitHub button under the chat box: pick the repo the AI may read, or go connect GitHub. */
+const TTL_MS = 5 * 60 * 1000;
+
+/** * Button under the chat box that opens the project dialog: tick GitHub repos and local folders to read together (the first is the main project). */
 export function RepoPicker({
     repo,
     onChange,
+    extras,
+    onExtrasChange,
     connected,
     disabled,
-    autoPr,
-    onAutoPrChange,
+    compact = false,
+    projectTitle = '',
+    onProjectTitleChange,
 }: {
     repo: string | null;
     onChange: (repo: string | null) => void;
+    /** * Further projects picked together with `repo` (read-only context for the AI). */
+    extras: string[];
+    onExtrasChange: (extras: string[]) => void;
     connected: boolean;
     disabled?: boolean;
-    /** * Open the pull request for AI edits without a manual approval (never writes to the base branch). */
-    autoPr: boolean;
-    onAutoPrChange: (value: boolean) => void;
+    /** * Only a small + (to add projects next to the chips of the ones already picked). */
+    compact?: boolean;
+    /** * Name of the picked group; empty means the first repo's own name. */
+    projectTitle?: string;
+    onProjectTitleChange?: (title: string) => void;
 }) {
+    const [open, setOpen] = useState(false);
     const [repos, setRepos] = useState<AiChatRepo[] | null>(null);
-    const [error, setError] = useState<string | null>(null);
-    const [search, setSearch] = useState('');
+    // * Same cached request as the Code tab: labels only, never a server path.
+    const { data: local, mutate } = useCachedRequest(
+        'local.status',
+        TTL_MS,
+        () =>
+            api
+                .get<{
+                    enabled: boolean;
+                    can_read: boolean;
+                    can_write: boolean;
+                    roots: LocalRoot[];
+                    projects: LocalProject[];
+                }>('/ai-chat/local/status')
+                .then(({ data }) => data),
+        open,
+    );
 
-    const load = async () => {
-        setError(null);
+    useEffect(() => {
+        if (!open || !connected) {
+            return;
+        }
 
-        try {
-            // * Shares the Code tab's cached request (5 minutes).
-            setRepos(
-                await cachedRequest('github.repos', 5 * 60 * 1000, () =>
-                    api
-                        .get<{ repos: AiChatRepo[] }>(reposRoute.url())
-                        .then(({ data }) => data.repos),
-                ),
-            );
-        } catch (caught) {
-            setRepos([]);
-            setError(
-                requestErrorMessage(caught, 'Không tải được danh sách repo.'),
-            );
+        let cancelled = false;
+
+        // * Shares the Code tab's cached request (5 minutes).
+        cachedRequest('github.repos', TTL_MS, () =>
+            api
+                .get<{ repos: AiChatRepo[] }>(reposRoute.url())
+                .then(({ data }) => data.repos),
+        )
+            .then((rows) => !cancelled && setRepos(rows))
+            .catch(() => !cancelled && setRepos([]));
+
+        return () => {
+            cancelled = true;
+        };
+    }, [open, connected]);
+
+    const selected = repo === null ? [] : [repo, ...extras];
+
+    const changed = (change: LocalProjectsChange) => {
+        invalidateAiChatCache('local.');
+
+        if (local) {
+            mutate({ ...local, ...change });
         }
     };
 
-    const query = search.trim().toLowerCase();
-    const shown = (repos ?? []).filter((row) =>
-        row.full_name.toLowerCase().includes(query),
-    );
-
     return (
-        <DropdownMenu
-            onOpenChange={(open) => {
-                setSearch('');
-
-                if (open && connected) {
-                    void load();
-                }
-            }}
-        >
-            <DropdownMenuTrigger asChild>
+        <>
+            {compact && selected.length > 0 ? (
+                <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    disabled={disabled}
+                    aria-label="Thêm dự án"
+                    title="Thêm dự án"
+                    className="size-6 text-muted-foreground"
+                    onClick={() => setOpen(true)}
+                >
+                    <Plus aria-hidden="true" />
+                </Button>
+            ) : (
                 <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     disabled={disabled}
-                    aria-label="Chọn repo GitHub"
-                    className="h-8 max-w-44 gap-1.5 px-2 text-muted-foreground"
+                    aria-label="Chọn dự án"
+                    className="h-7 max-w-44 gap-1.5 bg-muted/40 px-2 text-muted-foreground hover:bg-muted/70"
+                    onClick={() => setOpen(true)}
                 >
-                    <Github aria-hidden="true" />
-                    <span className="truncate">{repo ?? 'GitHub'}</span>
+                    <SourceIcon local={repo?.startsWith('local:') === true} />
+                    <span className="truncate">Dự án</span>
                 </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-72 p-1">
-                {!connected ? (
-                    <div className="flex flex-col gap-2 p-2">
-                        <p className="text-sm text-muted-foreground">
-                            Kết nối GitHub (token chỉ đọc) để AI đọc repo khi
-                            review code.
-                        </p>
-                        <Button asChild size="sm">
-                            <Link href="/integrations/github">
-                                Kết nối GitHub
-                            </Link>
-                        </Button>
-                    </div>
-                ) : (
-                    <>
-                        <Input
-                            value={search}
-                            onChange={(event) => setSearch(event.target.value)}
-                            onKeyDown={(event) => event.stopPropagation()}
-                            aria-label="Tìm repo"
-                            placeholder="Tìm repo..."
-                            className="mb-1 h-8 shadow-none"
-                        />
-                        <div className="max-h-64 overflow-y-auto">
-                            {repos === null && (
-                                <p className="px-2 py-3 text-sm text-muted-foreground">
-                                    Đang tải...
-                                </p>
-                            )}
-                            {error && (
-                                <p className="px-2 py-3 text-sm text-destructive">
-                                    {error}
-                                </p>
-                            )}
-                            {repos !== null && !error && shown.length === 0 && (
-                                <p className="px-2 py-3 text-sm text-muted-foreground">
-                                    Không có repo phù hợp.
-                                </p>
-                            )}
-                            {shown.map((row) => (
-                                <DropdownMenuItem
-                                    key={row.full_name}
-                                    onSelect={() => onChange(row.full_name)}
-                                    className="justify-between gap-2"
-                                >
-                                    <span className="flex min-w-0 items-center gap-1.5">
-                                        <span className="truncate">
-                                            {row.full_name}
-                                        </span>
-                                        {row.private && (
-                                            <Lock
-                                                aria-label="Repo riêng tư"
-                                                className="size-3 shrink-0 text-muted-foreground"
-                                            />
-                                        )}
-                                    </span>
-                                    {row.full_name === repo && (
-                                        <Check aria-hidden="true" />
-                                    )}
-                                </DropdownMenuItem>
-                            ))}
-                        </div>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuCheckboxItem
-                            checked={autoPr}
-                            onCheckedChange={onAutoPrChange}
-                            onSelect={(event) => event.preventDefault()}
-                        >
-                            Tự tạo Pull Request khi AI sửa code
-                        </DropdownMenuCheckboxItem>
-                        <DropdownMenuSeparator />
-                        {repo && (
-                            <DropdownMenuItem onSelect={() => onChange(null)}>
-                                Bỏ chọn repo
-                            </DropdownMenuItem>
-                        )}
-                        <DropdownMenuItem asChild>
-                            <Link href="/integrations/github">
-                                Quản lý kết nối GitHub
-                            </Link>
-                        </DropdownMenuItem>
-                    </>
-                )}
-            </DropdownMenuContent>
-        </DropdownMenu>
+            )}
+            <LocalProjectDialog
+                open={open}
+                onOpenChange={setOpen}
+                projects={local?.projects ?? []}
+                onChanged={changed}
+                unavailable={localUnavailableReason(local)}
+                githubRepos={connected ? repos : null}
+                localRoots={local?.enabled && local.can_read ? local.roots : []}
+                selected={selected}
+                projectTitle={projectTitle}
+                onPickRepos={(list, title) => {
+                    onProjectTitleChange?.(title);
+                    onChange(list[0] ?? null);
+                    onExtrasChange(list.slice(1));
+                }}
+            />
+        </>
     );
 }

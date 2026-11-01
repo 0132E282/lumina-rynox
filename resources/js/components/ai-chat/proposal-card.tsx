@@ -1,4 +1,5 @@
 import { ExternalLink, GitPullRequest, HardDrive } from 'lucide-react';
+import { invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import { useState } from 'react';
 import {
     applyProposals,
@@ -53,6 +54,9 @@ export function ProposalCard({
                     : route.url(messageId),
             );
 
+            // * Applied edits change the files: cached trees and file texts of this repo are stale.
+            invalidateAiChatCache(`tree.${proposals[0].repo}`);
+            invalidateAiChatCache(`file.${proposals[0].repo}.`);
             onChange(data.proposals);
         } catch (caught) {
             setError(aiErrorMessage(caught));

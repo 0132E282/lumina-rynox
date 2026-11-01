@@ -31,7 +31,22 @@ final class LocalWorkspaceException extends RuntimeException
 
     public const WRITE_FAILED = 'Không ghi được tệp.';
 
-    public function __construct(string $message, public readonly int $status = 422)
+    public const BAD_FOLDER = 'Thư mục không hợp lệ hoặc không tồn tại.';
+
+    public const FOLDER_LINK = 'Đường dẫn có liên kết tượng trưng; hãy dùng đường dẫn thật của thư mục.';
+
+    public const FOLDER_NOT_ALLOWED = 'Thư mục này nằm ngoài vị trí cho phép hoặc là vị trí nhạy cảm.';
+
+    public const FOLDER_DUPLICATE = 'Thư mục này đã được thêm.';
+
+    public const NAME_TAKEN = 'Tên dự án đã tồn tại.';
+
+    public const TOO_MANY_PROJECTS = 'Đã đạt số dự án tối đa.';
+
+    public const TOO_MANY_FOLDERS = 'Mỗi dự án tối đa 5 thư mục.';
+
+    /** @param string|null $field the request field the message belongs to (for the form) */
+    public function __construct(string $message, public readonly int $status = 422, public readonly ?string $field = null)
     {
         parent::__construct($message);
     }

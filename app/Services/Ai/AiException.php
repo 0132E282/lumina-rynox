@@ -12,6 +12,12 @@ use RuntimeException;
  */
 final class AiException extends RuntimeException
 {
+    /** @param QuotaLimit|null $limit for a quota stop only: the kind of limit and reset time the error stated (no text) */
+    public function __construct(string $message, public readonly ?QuotaLimit $limit = null)
+    {
+        parent::__construct($message);
+    }
+
     public const NOT_CONFIGURED = 'Chưa cấu hình trợ lý AI.';
 
     public const NO_KEY = 'Chưa lưu API key cho nhà cung cấp đã chọn.';

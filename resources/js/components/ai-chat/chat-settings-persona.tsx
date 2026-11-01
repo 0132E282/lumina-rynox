@@ -1,5 +1,5 @@
 import { isAxiosError } from 'axios';
-import { Check } from 'lucide-react';
+import { Check, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useWatch } from 'react-hook-form';
@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils';
 import type { AiChatSettings } from '@/types';
 
 // * Same limits as `AiChatSetting` / `SaveAiChatSettingsRequest`.
-export const MAX_INSTRUCTIONS = 8000;
+const MAX_INSTRUCTIONS = 8000;
 const MAX_DISPLAY_NAME = 60;
 const MAX_ASSISTANT_NAME = 40;
 
@@ -24,7 +24,7 @@ export type PersonaErrors = Partial<
     Record<keyof AiChatSettings | 'avatar', string>
 >;
 
-export function FormField({
+function FormField({
     label,
     htmlFor,
     error,
@@ -48,7 +48,7 @@ export function FormField({
 }
 
 /** * Choice buttons of a fixed list, announced as a radio group. */
-export function Choices({
+function Choices({
     label,
     value,
     onChange,
@@ -119,6 +119,7 @@ export function ChatSettingsPersona({
 }) {
     const fileInput = useRef<HTMLInputElement>(null);
     const [uploading, setUploading] = useState(false);
+    const [showTools, setShowTools] = useState(false);
     const [avatarError, setAvatarError] = useState<string | undefined>();
     const instructions = useWatch({ name: 'custom_instructions' }) ?? '';
 
@@ -173,73 +174,73 @@ export function ChatSettingsPersona({
                 hint="Ảnh tải lên (jpg, png, webp, gif, tối đa 1 MB) được ưu tiên hơn biểu tượng và logo. Avatar của bạn là ảnh hồ sơ hoặc chữ cái đầu của tên."
             >
                 <div className="flex items-start gap-3">
-                    <AssistantAvatar
-                        imageUrl={settings.avatar_url}
-                        icon={draft.assistant_icon}
-                        color={draft.assistant_color}
-                        vendor={vendor}
-                        className="size-16"
-                    />
-                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                            <input
-                                ref={fileInput}
-                                type="file"
-                                accept="image/jpeg,image/png,image/webp,image/gif"
-                                className="sr-only"
-                                aria-label="Chọn ảnh avatar"
-                                tabIndex={-1}
-                                onChange={(event) => {
-                                    const file = event.target.files?.[0];
+                    {/* * Click (or focus) the image to reveal the upload and remove icons over it; the icon and color choices sit beside it. */}
+                    <div className="group relative shrink-0">
+                        <input
+                            ref={fileInput}
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp,image/gif"
+                            className="sr-only"
+                            aria-label="Chọn ảnh avatar"
+                            tabIndex={-1}
+                            onChange={(event) => {
+                                const file = event.target.files?.[0];
 
-                                    event.target.value = '';
+                                event.target.value = '';
 
-                                    if (file) {
-                                        void sendImage(async () => {
-                                            const form = new FormData();
+                                if (file) {
+                                    void sendImage(async () => {
+                                        const form = new FormData();
 
-                                            form.append(
-                                                'avatar',
-                                                await prepareAvatarFile(file),
-                                            );
+                                        form.append(
+                                            'avatar',
+                                            await prepareAvatarFile(file),
+                                        );
 
-                                            return api.post(
-                                                '/ai-chat/settings/avatar',
-                                                form,
-                                            );
-                                        }, 'Đã cập nhật ảnh avatar.');
-                                    }
-                                }}
-                            />
-                            <Button
+                                        return api.post(
+                                            '/ai-chat/settings/avatar',
+                                            form,
+                                        );
+                                    }, 'Đã cập nhật ảnh avatar.');
+                                }
+                            }}
+                        />
+                        <AssistantAvatar
+                            imageUrl={settings.avatar_url}
+                            icon={draft.assistant_icon}
+                            color={draft.assistant_color}
+                            vendor={vendor}
+                            className="size-16"
+                        />
+                        <div
+                            className={cn(
+                                'absolute inset-0 flex items-center justify-center gap-1 rounded-full bg-black/60 text-white transition-opacity group-hover:opacity-100 focus-within:opacity-100',
+                                showTools || uploading
+                                    ? 'opacity-100'
+                                    : 'opacity-0',
+                            )}
+                        >
+                            <button
                                 type="button"
-                                variant="outline"
-                                size="sm"
+                                aria-label="Tải ảnh lên"
+                                title="Tải ảnh lên"
                                 disabled={uploading}
                                 onClick={() => fileInput.current?.click()}
+                                className="rounded-full p-1.5 hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50"
                             >
-                                {uploading ? 'Đang tải...' : 'Tải ảnh lên'}
-                            </Button>
-                            {settings.avatar_url && (
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    disabled={uploading}
-                                    onClick={() =>
-                                        void sendImage(
-                                            () =>
-                                                api.delete(
-                                                    '/ai-chat/settings/avatar',
-                                                ),
-                                            'Đã gỡ ảnh avatar.',
-                                        )
-                                    }
-                                >
-                                    Gỡ ảnh
-                                </Button>
-                            )}
+                                <Upload className="size-4" aria-hidden="true" />
+                            </button>
                         </div>
+                        {/* * Touch screens have no hover: tapping the image toggles the icons. */}
+                        <button
+                            type="button"
+                            aria-label="Đổi ảnh avatar"
+                            aria-expanded={showTools}
+                            onClick={() => setShowTools((value) => !value)}
+                            className="absolute inset-0 -z-0 rounded-full group-hover:hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                        />
+                    </div>
+                    <div className="flex min-w-0 flex-1 flex-col gap-3">
                         <Choices
                             label="Biểu tượng"
                             value={draft.assistant_icon}

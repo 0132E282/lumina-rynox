@@ -2,17 +2,85 @@
 
 const PREFIX = 'ai-chat.cache.';
 const MAX_ENTRY_CHARS = 200_000;
+const MAX_ENTRIES = 40;
+
+/**
+ * Whose data the in-memory caches hold. Every memory key is prefixed with it, so one person's data is never served to another; set by the chat page from the signed-in user.
+ * Switching to another person drops the memory caches.
+ */
+let scope = 'anon';
+
+export function setAiChatCacheScope(userId: number): void {
+    const next = String(userId);
+
+    if (next !== scope) {
+        scope = next;
+        requests.clear();
+        revalidated.clear();
+        inflight.clear();
+    }
+}
+
+const scoped = (key: string) => `${scope}|${key}`;
 
 const keyFor = (userId: number, name: string) => `${PREFIX}${userId}.${name}`;
 
-export function readAiChatCache<T>(userId: number, name: string): T | null {
-    try {
-        const raw = sessionStorage.getItem(keyFor(userId, name));
+type Stored = { t: number; v: unknown };
 
-        return raw === null ? null : (JSON.parse(raw) as T);
+/** @returns the stored copy, or null when missing or corrupted (a corrupted entry is dropped). */
+export function readAiChatCache<T>(userId: number, name: string): T | null {
+    const key = keyFor(userId, name);
+
+    try {
+        const raw = sessionStorage.getItem(key);
+
+        if (raw === null) {
+            return null;
+        }
+
+        const parsed = JSON.parse(raw) as Partial<Stored> | null;
+
+        if (
+            parsed === null ||
+            typeof parsed !== 'object' ||
+            typeof parsed.t !== 'number' ||
+            !('v' in parsed)
+        ) {
+            sessionStorage.removeItem(key);
+
+            return null;
+        }
+
+        return parsed.v as T;
     } catch {
+        try {
+            sessionStorage.removeItem(key);
+        } catch {
+            // * Storage blocked: nothing to drop.
+        }
+
         return null;
     }
+}
+
+/** * Keeps the entry count bounded: the oldest entries (by write time) go first. */
+function evictOldest(): void {
+    const keys = Object.keys(sessionStorage).filter((key) =>
+        key.startsWith(PREFIX),
+    );
+
+    if (keys.length < MAX_ENTRIES) {
+        return;
+    }
+
+    const written = (key: string) =>
+        Number(
+            /^\{"t":(\d+)/.exec(sessionStorage.getItem(key) ?? '')?.[1] ?? 0,
+        );
+
+    keys.sort((a, b) => written(a) - written(b))
+        .slice(0, keys.length - MAX_ENTRIES + 1)
+        .forEach((key) => sessionStorage.removeItem(key));
 }
 
 export function writeAiChatCache(
@@ -21,12 +89,16 @@ export function writeAiChatCache(
     value: unknown,
 ): void {
     try {
-        const raw = JSON.stringify(value);
+        const raw = JSON.stringify({
+            t: Date.now(),
+            v: value,
+        } satisfies Stored);
 
         if (raw.length > MAX_ENTRY_CHARS) {
             return;
         }
 
+        evictOldest();
         sessionStorage.setItem(keyFor(userId, name), raw);
     } catch {
         // * Storage blocked or full: the cache is optional, the page still works.
@@ -44,7 +116,8 @@ export function cachedRequest<T>(
     ttlMs: number,
     fetcher: () => Promise<T>,
 ): Promise<T> {
-    const hit = requests.get(key);
+    const memoryKey = scoped(key);
+    const hit = requests.get(memoryKey);
 
     if (hit && Date.now() - hit.at < ttlMs) {
         return hit.promise as Promise<T>;
@@ -52,19 +125,106 @@ export function cachedRequest<T>(
 
     const promise = fetcher();
 
-    requests.set(key, { at: Date.now(), promise });
+    requests.set(memoryKey, { at: Date.now(), promise });
     promise.catch(() => {
-        if (requests.get(key)?.promise === promise) {
-            requests.delete(key);
+        if (requests.get(memoryKey)?.promise === promise) {
+            requests.delete(memoryKey);
         }
     });
 
     return promise;
 }
 
+// * Stale-while-revalidate for data shown in dialogs and menus: the last value is shown at once, a background request refreshes it when older than its TTL.
+// * Memory only on purpose (account names, local folder labels): nothing of it reaches sessionStorage.
+const revalidated = new Map<
+    string,
+    { at: number; ttlMs: number; value: unknown }
+>();
+const inflight = new Map<string, Promise<unknown>>();
+
+/** @returns the last value and whether it is still within its TTL, or null when there is none. */
+export function peekAiChatRequest<T>(
+    key: string,
+): { value: T; fresh: boolean } | null {
+    const hit = revalidated.get(scoped(key));
+
+    return hit
+        ? { value: hit.value as T, fresh: Date.now() - hit.at < hit.ttlMs }
+        : null;
+}
+
+/** * Puts a known-good value in the cache (for example the answer of a write that returns the new state). */
+export function storeAiChatRequest(
+    key: string,
+    ttlMs: number,
+    value: unknown,
+): void {
+    revalidated.set(scoped(key), { at: Date.now(), ttlMs, value });
+}
+
+/** * Fetches and stores the value; callers asking for the same key meanwhile share one request. A failure keeps the previous value. */
+export function refreshAiChatRequest<T>(
+    key: string,
+    ttlMs: number,
+    fetcher: () => Promise<T>,
+): Promise<T> {
+    const memoryKey = scoped(key);
+    const running = inflight.get(memoryKey);
+
+    if (running) {
+        return running as Promise<T>;
+    }
+
+    const promise = fetcher()
+        .then((value) => {
+            // * A write invalidated this key while the request ran: its answer may predate the write, so it is not stored.
+            if (inflight.get(memoryKey) === promise) {
+                storeAiChatRequest(key, ttlMs, value);
+            }
+
+            return value;
+        })
+        .finally(() => {
+            if (inflight.get(memoryKey) === promise) {
+                inflight.delete(memoryKey);
+            }
+        });
+
+    inflight.set(memoryKey, promise);
+
+    return promise;
+}
+
+/**
+ * Drops every cached entry whose key starts with `prefix`, in memory and in sessionStorage, for the current person. Call it after a write that changes that data
+ * (`usage`, `local.`, `tree.{repo}`, `file.{repo}.`).
+ */
+export function invalidateAiChatCache(prefix: string): void {
+    const memoryPrefix = scoped(prefix);
+
+    [requests, revalidated, inflight].forEach((map) =>
+        [...map.keys()]
+            .filter((key) => key.startsWith(memoryPrefix))
+            .forEach((key) => map.delete(key)),
+    );
+
+    try {
+        const storagePrefix = `${PREFIX}${scope}.${prefix}`;
+
+        Object.keys(sessionStorage)
+            .filter((key) => key.startsWith(storagePrefix))
+            .forEach((key) => sessionStorage.removeItem(key));
+    } catch {
+        // * Storage blocked: only memory was cleared.
+    }
+}
+
 /** * Removes every cached AI chat entry (called at logout). */
 export function clearAiChatCache(): void {
     requests.clear();
+    revalidated.clear();
+    inflight.clear();
 
     try {
         Object.keys(sessionStorage)

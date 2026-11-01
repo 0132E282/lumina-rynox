@@ -17,5 +17,7 @@ class AiUsageLog extends Model
 
     public const UPDATED_AT = null;
 
-    protected $fillable = ['ai_account_id', 'user_id', 'purpose', 'model', 'status', 'error_kind', 'tokens_in', 'tokens_out'];
+    protected $casts = ['limit_reset_at' => 'datetime'];
+
+    protected $fillable = ['ai_account_id', 'user_id', 'purpose', 'model', 'status', 'error_kind', 'tokens_in', 'tokens_out', 'limit_scope', 'limit_reset_at'];
 }

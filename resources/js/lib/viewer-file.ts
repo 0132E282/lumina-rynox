@@ -1,7 +1,7 @@
 import { looksLikeSvg, readSvgFile } from '@/lib/svg-file';
 
 /** * Largest source shown as a file card; anything bigger stays a plain code block. */
-export const MAX_FILE_BYTES = 500 * 1024;
+const MAX_FILE_BYTES = 500 * 1024;
 /** * A block without a file name must be longer than this to become a card. */
 const MIN_LINES_WITHOUT_NAME = 15;
 
@@ -68,7 +68,7 @@ export type ViewerFile = {
 /**
  * Download name from whatever the model wrote: the path is dropped, only safe characters stay and the extension always comes from the type's allowlist.
  */
-export function safeFileName(name: string, ext: string): string {
+function safeFileName(name: string, ext: string): string {
     const base = (name.split(/[\\/]/).pop() ?? '')
         .normalize('NFD')
         .replace(/[̀-ͯ]/g, '')

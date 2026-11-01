@@ -1,5 +1,8 @@
 import type { ColumnDef } from '@tanstack/react-table';
 import { Plus } from 'lucide-react';
+import { VendorBadge } from '@/components/ai-chat/vendor-badge';
+import { RowActionsMenu } from '@/components/tables/row-actions-menu';
+import { AccountLimit } from '@/components/integrations/account-limit';
 import { DataTable } from '@/components/tables/data-table';
 import { DataTableColumnHeader } from '@/components/tables/data-table-column-header';
 import { Button } from '@/components/ui/button';
@@ -50,12 +53,20 @@ export function AiAccountsTable({
                 <DataTableColumnHeader column={column} title="Tài khoản" />
             ),
             cell: ({ row }) => (
-                <div className="whitespace-normal">
-                    <p className="font-medium">{row.original.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                        {labelOf(options.vendors, row.original.vendor)}
-                        {row.original.model ? ` · ${row.original.model}` : ''}
-                    </p>
+                <div className="flex items-center gap-3 whitespace-normal">
+                    <VendorBadge
+                        vendorKey={row.original.vendor}
+                        fallback={labelOf(options.vendors, row.original.vendor)}
+                    />
+                    <div>
+                        <p className="font-medium">{row.original.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                            {labelOf(options.vendors, row.original.vendor)}
+                            {row.original.model
+                                ? ` · ${row.original.model}`
+                                : ''}
+                        </p>
+                    </div>
                 </div>
             ),
         },
@@ -112,6 +123,22 @@ export function AiAccountsTable({
             ),
         },
         {
+            id: 'limit',
+            meta: { label: 'Giới hạn' },
+            enableSorting: false,
+            header: ({ column }) => (
+                <DataTableColumnHeader column={column} title="Giới hạn" />
+            ),
+            cell: ({ row }) => (
+                <div
+                    className="whitespace-normal"
+                    title="Lấy từ lỗi thật của nhà cung cấp, không có số hạn mức còn lại."
+                >
+                    <AccountLimit limit={row.original.limit} />
+                </div>
+            ),
+        },
+        {
             id: 'last_checked_at',
             accessorKey: 'last_checked_at',
             meta: { label: 'Dùng lần cuối' },
@@ -129,61 +156,57 @@ export function AiAccountsTable({
             enableHiding: false,
             enableSorting: false,
             cell: ({ row }) => (
-                <div className="flex justify-end gap-2">
-                    <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={disabled}
-                        onClick={() => onTest(row.original)}
-                    >
-                        Kiểm tra
-                    </Button>
-                    <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={disabled}
-                        onClick={() => onToggle(row.original)}
-                    >
-                        {row.original.enabled ? 'Tắt' : 'Bật'}
-                    </Button>
-                    <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={disabled}
-                        onClick={() => onEdit(row.original)}
-                    >
-                        Sửa
-                    </Button>
-                    <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={disabled}
-                        onClick={() => onDelete(row.original)}
-                    >
-                        Xoá
-                    </Button>
+                <div className="flex justify-end">
+                    <RowActionsMenu
+                        triggerLabel={`Mở menu hành động của ${row.original.name}`}
+                        items={[
+                            {
+                                label: 'Kiểm tra',
+                                disabled,
+                                onSelect: () => onTest(row.original),
+                            },
+                            {
+                                label: row.original.enabled ? 'Tắt' : 'Bật',
+                                disabled,
+                                onSelect: () => onToggle(row.original),
+                            },
+                            {
+                                label: 'Sửa',
+                                disabled,
+                                onSelect: () => onEdit(row.original),
+                            },
+                            {
+                                label: 'Xoá',
+                                destructive: true,
+                                disabled,
+                                onSelect: () => onDelete(row.original),
+                            },
+                        ]}
+                    />
                 </div>
             ),
         },
     ];
 
     return (
-        <DataTable
-            columns={columns}
-            data={accounts}
-            hideCreate
-            hideSearch
-            emptyMessage='Chưa có tài khoản AI nào. Bấm "Thêm tài khoản" để bắt đầu.'
-            toolbarActions={
-                <Button type="button" disabled={disabled} onClick={onAdd}>
-                    <Plus aria-hidden="true" />
-                    Thêm tài khoản
-                </Button>
-            }
-        />
+        <>
+            <DataTable
+                columns={columns}
+                data={accounts}
+                hideCreate
+                hideSearch
+                emptyMessage='Chưa có tài khoản AI nào. Bấm "Thêm tài khoản" để bắt đầu.'
+                toolbarActions={
+                    <Button type="button" disabled={disabled} onClick={onAdd}>
+                        <Plus aria-hidden="true" />
+                        Thêm tài khoản
+                    </Button>
+                }
+            />
+            <p className="text-xs text-muted-foreground">
+                Cột Giới hạn chỉ lấy từ lỗi thật của nhà cung cấp (loại limit và
+                giờ reset nếu lỗi nêu rõ), không có số hạn mức còn lại.
+            </p>
+        </>
     );
 }

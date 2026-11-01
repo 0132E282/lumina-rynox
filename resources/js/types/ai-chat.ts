@@ -1,3 +1,5 @@
+import type { AiAccountLimit } from './integration';
+
 export type AiChatRole = 'user' | 'assistant';
 
 export type AiChatConversation = {
@@ -175,6 +177,8 @@ export type AiUsageAccount = {
     /** * `active|error|quota|unused|disabled`; `quota` only while the latest quota error is newer than the latest success. */
     status: string;
     status_at: string | null;
+    /** * Limit state from real provider errors only (no remaining-quota numbers). */
+    limit: AiAccountLimit;
 };
 
 export type AiUsageStats = {
@@ -183,4 +187,16 @@ export type AiUsageStats = {
     accounts: AiUsageAccount[];
     /** * Assistant replies already in the chat history (no account is stored there, so they are not split per account). */
     history: { replies_24h: number; replies_7d: number };
+};
+
+/** * One agent working right now (a message that is out and not answered yet), shown in the composer's Agent list. */
+export type AiAgentRun = {
+    id: number;
+    /** * The AI account answering. */
+    name: string;
+    /** * What it is doing now. */
+    step: string;
+    /** * The chat it works for (the start of the message). */
+    task: string;
+    startedAt: number;
 };

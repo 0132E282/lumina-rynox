@@ -1,10 +1,27 @@
-import { Check, ChevronDown, ChevronRight, Copy, File, X } from 'lucide-react';
+import {
+    Check,
+    ChevronDown,
+    ChevronRight,
+    ChevronsDownUp,
+    Code2,
+    Copy,
+    Eye,
+    X,
+} from 'lucide-react';
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import {
     file as fileRoute,
     tree as treeRoute,
 } from '@/actions/App/Http/Controllers/AiChatController';
 import { Button } from '@/components/ui/button';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { FileIcon } from '@/components/ai-chat/file-icon';
+import { MarkdownContent } from '@/components/ai-chat/markdown-content';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { cachedRequest } from '@/lib/ai-chat-cache';
 import { requestErrorMessage } from '@/lib/ai-error';
@@ -12,6 +29,7 @@ import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { useResizableWidth } from '@/hooks/use-resizable-width';
 import type { AiChatProposal } from '@/types';
 import { Input } from '@/components/ui/input';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -133,11 +151,13 @@ function TreeItems({
                                     />
                                 )
                             ) : (
-                                <File
-                                    aria-hidden="true"
-                                    className="size-3.5 shrink-0 text-muted-foreground"
-                                />
+                                <span className="size-3.5 shrink-0" />
                             )}
+                            <FileIcon
+                                name={node.name}
+                                dir={isDir}
+                                open={isOpen}
+                            />
                             <span
                                 className={cn(
                                     'truncate',
@@ -185,17 +205,15 @@ function TreeItems({
 /** * Read-only code viewer of the selected GitHub repo: file tree on the right, the open file with line numbers on the left. */
 export function CodeViewer({
     repo,
-    onClose,
-    onMention,
-    onReview,
+    repos,
+    onViewRepo,
     changes,
 }: {
+    /** * The project whose files are shown. */
     repo: string;
-    onClose: () => void;
-    /** * Puts the file's path into the chat draft so the AI reads it. */
-    onMention: (path: string) => void;
-    /** * Like onMention, and also fills a Vietnamese review prompt into the draft (never sends it). */
-    onReview: (path: string) => void;
+    /** * Every project picked for the chat; with more than one the header offers a dropdown to switch. */
+    repos: string[];
+    onViewRepo: (repo: string) => void;
     /** * Files the AI changed in this conversation (shown with M/A marks and a diff). */
     changes: AiChatProposal[];
 }) {
@@ -213,6 +231,13 @@ export function CodeViewer({
     // * For a changed file: the AI's version, shown as a diff against `content` (the file as it is on the default branch).
     const [proposed, setProposed] = useState<string | null>(null);
     const [fileError, setFileError] = useState<string | null>(null);
+    // * An image file arrives as a data URL and is shown as a picture instead of text.
+    const [image, setImage] = useState<string | null>(null);
+    // * A markdown file can be read rendered instead of as code (resets when another file opens).
+    const [preview, setPreview] = useState(false);
+    const isMarkdown = /\.(md|markdown)$/i.test(selected ?? '');
+
+    useEffect(() => setPreview(false), [selected]);
 
     useEffect(() => {
         let cancelled = false;
@@ -312,6 +337,7 @@ export function CodeViewer({
 
         setSelected(path);
         setContent(null);
+        setImage(null);
         setProposed(change?.content ?? null);
         setFileError(null);
 
@@ -326,7 +352,7 @@ export function CodeViewer({
             // * A file read stays cached for a minute so clicking back and forth does not burn the per-minute budget (a local file may change, so it is not cached).
             const load = () =>
                 api
-                    .get<{ content: string }>(
+                    .get<{ content?: string; image?: string }>(
                         localRoot
                             ? '/ai-chat/local/file'
                             : fileRoute.url({ query: { repo, path } }),
@@ -334,13 +360,14 @@ export function CodeViewer({
                             ? { params: { root: localRoot, path } }
                             : undefined,
                     )
-                    .then(({ data }) => data.content);
+                    .then(({ data }) => data);
 
-            setContent(
-                localRoot
-                    ? await load()
-                    : await cachedRequest(`file.${repo}.${path}`, 60_000, load),
-            );
+            const file = localRoot
+                ? await load()
+                : await cachedRequest(`file.${repo}.${path}`, 60_000, load);
+
+            setImage(file.image ?? null);
+            setContent(file.content ?? '');
         } catch (caught) {
             setFileError(errorText(caught, 'Không mở được tệp.'));
         }
@@ -364,7 +391,7 @@ export function CodeViewer({
                 <section
                     aria-label="Nội dung tệp"
                     style={{ width: fileWidth.width }}
-                    className="relative hidden min-h-0 max-w-[60%] shrink-0 flex-col border-l lg:flex"
+                    className="relative hidden min-h-0 max-w-[60%] min-w-[18rem] shrink flex-col border-l lg:flex"
                 >
                     <ResizeHandle
                         label="Đổi độ rộng khung xem tệp"
@@ -381,6 +408,33 @@ export function CodeViewer({
                             </bdi>
                         </span>
                         <span className="flex shrink-0 items-center gap-1">
+                            {isMarkdown &&
+                                content !== null &&
+                                proposed === null && (
+                                    <Tabs
+                                        value={preview ? 'view' : 'code'}
+                                        onValueChange={(value) =>
+                                            setPreview(value === 'view')
+                                        }
+                                    >
+                                        <TabsList className="h-7">
+                                            <TabsTrigger
+                                                value="view"
+                                                className="gap-1 px-2.5 text-xs"
+                                            >
+                                                <Eye aria-hidden="true" />
+                                                Xem
+                                            </TabsTrigger>
+                                            <TabsTrigger
+                                                value="code"
+                                                className="gap-1 px-2.5 text-xs"
+                                            >
+                                                <Code2 aria-hidden="true" />
+                                                Mã
+                                            </TabsTrigger>
+                                        </TabsList>
+                                    </Tabs>
+                                )}
                             <Button
                                 type="button"
                                 variant="ghost"
@@ -395,24 +449,6 @@ export function CodeViewer({
                                 ) : (
                                     <Copy aria-hidden="true" />
                                 )}
-                            </Button>
-                            <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-7"
-                                onClick={() => onMention(selected)}
-                            >
-                                Nhờ AI đọc tệp này
-                            </Button>
-                            <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-7"
-                                onClick={() => onReview(selected)}
-                            >
-                                Review
                             </Button>
                             <Button
                                 type="button"
@@ -437,6 +473,18 @@ export function CodeViewer({
                         <p className="m-4 text-sm text-muted-foreground">
                             Đang tải...
                         </p>
+                    ) : image !== null ? (
+                        <div className="flex min-h-0 flex-1 items-start justify-center overflow-auto p-4">
+                            <img
+                                src={image}
+                                alt={selected}
+                                className="h-auto max-w-full rounded-md border bg-[repeating-conic-gradient(var(--muted)_0%_25%,transparent_0%_50%)] bg-[length:16px_16px]"
+                            />
+                        </div>
+                    ) : preview && isMarkdown && proposed === null ? (
+                        <div className="min-h-0 flex-1 overflow-auto p-4">
+                            <MarkdownContent content={content} />
+                        </div>
                     ) : (
                         <div className="min-h-0 flex-1">
                             <Suspense
@@ -474,18 +522,58 @@ export function CodeViewer({
                     {...treeWidth.handleProps}
                 />
                 <header className="flex h-12 items-center justify-between gap-2 border-b px-3">
-                    <span className="truncate text-sm font-medium">
-                        {sourceName}
-                    </span>
+                    {repos.length > 1 ? (
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <button
+                                    type="button"
+                                    aria-label="Chọn dự án để xem tệp"
+                                    className="flex min-w-0 items-center gap-1 rounded-md px-1 py-1 text-sm font-medium hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                >
+                                    <span className="truncate">
+                                        {sourceName}
+                                    </span>
+                                    <ChevronDown
+                                        aria-hidden="true"
+                                        className="size-4 shrink-0 text-muted-foreground"
+                                    />
+                                </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="start">
+                                {repos.map((item) => (
+                                    <DropdownMenuItem
+                                        key={item}
+                                        onSelect={() => onViewRepo(item)}
+                                        className="justify-between gap-3"
+                                    >
+                                        <span className="truncate">
+                                            {item.startsWith('local:')
+                                                ? `Máy local · ${item.slice(6)}`
+                                                : item}
+                                        </span>
+                                        {item === repo && (
+                                            <Check aria-hidden="true" />
+                                        )}
+                                    </DropdownMenuItem>
+                                ))}
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    ) : (
+                        <span className="truncate text-sm font-medium">
+                            {sourceName}
+                        </span>
+                    )}
                     <Button
                         type="button"
                         variant="ghost"
                         size="icon"
-                        aria-label="Đóng trình xem code"
-                        onClick={onClose}
-                        className="size-8 text-muted-foreground"
+                        aria-label="Thu gọn tất cả thư mục"
+                        title="Thu gọn tất cả thư mục"
+                        disabled={openDirs.size === 0}
+                        onClick={() => setOpenDirs(new Set())}
+                        className="ml-auto size-8 shrink-0 text-muted-foreground"
                     >
-                        <X aria-hidden="true" />
+                        <ChevronsDownUp aria-hidden="true" />
                     </Button>
                 </header>
                 <nav

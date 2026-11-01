@@ -1,7 +1,7 @@
 /** * Largest SVG source shown as a file card; anything bigger stays a plain code block. */
-export const MAX_SVG_BYTES = 500 * 1024;
+const MAX_SVG_BYTES = 500 * 1024;
 
-export const DEFAULT_SVG_TITLE = 'Hình SVG';
+const DEFAULT_SVG_TITLE = 'Hình SVG';
 
 export type SvgFile = {
     title: string;
@@ -26,7 +26,7 @@ export function looksLikeSvg(code: string): boolean {
 }
 
 /** * Title from a `<title>` element, else the first leading comment; null when there is none. */
-export function svgTitleFromSource(code: string): string | null {
+function svgTitleFromSource(code: string): string | null {
     const element = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(code)?.[1];
     const comment = /^\s*(?:<\?xml[^>]*\?>\s*)?<!--([\s\S]*?)-->/i.exec(
         code,
@@ -54,7 +54,7 @@ const externalUrl = (value: string) =>
     /@import|expression\(|javascript:/i.test(value);
 
 /** * Removes everything that could run or load something: scripts, event handlers, external hrefs/urls. Returns null if the markup is not a valid SVG. */
-export function sanitizeSvg(source: string): string | null {
+function sanitizeSvg(source: string): string | null {
     const document = new DOMParser().parseFromString(source, 'image/svg+xml');
     const root = document.documentElement;
 

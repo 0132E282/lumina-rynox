@@ -10,6 +10,9 @@ return [
     'local_workspace' => [
         'enabled' => (bool) env('AI_CHAT_LOCAL_ENABLED', false),
 
+        // * Where a folder imported from the UI may live: comma-separated absolute folders. Empty = the home folder of the user running PHP. The base itself is never importable.
+        'import_bases' => array_values(array_filter(array_map('trim', explode(',', (string) env('AI_CHAT_LOCAL_IMPORT_BASES', ''))))),
+
         // * "id=/absolute/folder,other=/another/folder". Ids: letters, digits, `_` and `-`.
         'roots' => (function (): array {
             $roots = [];

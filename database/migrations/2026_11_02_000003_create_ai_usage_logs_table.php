@@ -21,6 +21,9 @@ return new class extends Migration
             // * Estimates (about 4 characters per token) made from the text length at call time; the text itself is never kept. Null on rows from before this existed, `tokens_out` also null when the call failed.
             $table->unsignedInteger('tokens_in')->nullable();
             $table->unsignedInteger('tokens_out')->nullable();
+            // * Only for a `quota` row, and only what the real error stated: `day|week` and the reset time. Null when the error did not say. Never the error text.
+            $table->string('limit_scope', 10)->nullable();
+            $table->timestamp('limit_reset_at')->nullable();
             $table->timestamp('created_at')->useCurrent();
 
             $table->index(['ai_account_id', 'created_at']);

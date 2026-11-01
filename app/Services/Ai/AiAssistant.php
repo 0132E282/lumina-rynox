@@ -524,13 +524,13 @@ class AiAssistant
             $text = $this->client($account, $model)->complete($system, $prompt);
         } catch (AiException $exception) {
             $this->record($account, 'error', $exception->getMessage());
-            $this->logUsage($account, $purpose, $model, $exception->getMessage() === AiException::QUOTA ? AiUsageLog::STATUS_QUOTA : AiUsageLog::STATUS_ERROR, $exception->kind(), $this->estimateTokens($system.$prompt), null);
+            $this->logUsage($account, $purpose, $model, $exception->getMessage() === AiException::QUOTA ? AiUsageLog::STATUS_QUOTA : AiUsageLog::STATUS_ERROR, $exception->kind(), $this->estimateTokens($system.$prompt), null, $exception->limit);
 
             throw $exception;
         }
 
         $this->record($account, 'connected', null);
-        $this->logUsage($account, $purpose, $model, AiUsageLog::STATUS_OK, null, $this->estimateTokens($system.$prompt), $this->estimateTokens($text));
+        $this->logUsage($account, $purpose, $model, AiUsageLog::STATUS_OK, null, $this->estimateTokens($system.$prompt), $this->estimateTokens($text), null);
 
         return $text;
     }
@@ -542,7 +542,7 @@ class AiAssistant
     }
 
     /** One row per real call: only the account, model, purpose, outcome and the estimated token counts. A missing table or column (migration not run yet) never breaks the call. */
-    private function logUsage(AiAccount $account, ?string $purpose, ?string $model, string $status, ?string $errorKind, int $tokensIn, ?int $tokensOut): void
+    private function logUsage(AiAccount $account, ?string $purpose, ?string $model, string $status, ?string $errorKind, int $tokensIn, ?int $tokensOut, ?QuotaLimit $limit): void
     {
         try {
             AiUsageLog::query()->create([
@@ -554,6 +554,9 @@ class AiAssistant
                 'error_kind' => $errorKind,
                 'tokens_in' => $tokensIn,
                 'tokens_out' => $tokensOut,
+                // * Only what a real limit error stated: the kind and the reset time, never its text.
+                'limit_scope' => $limit?->scope,
+                'limit_reset_at' => $limit?->resetAt,
             ]);
         } catch (QueryException) {
             // * Statistics are optional.

@@ -185,6 +185,34 @@ class GithubReader
         return $this->currentFile($repo, $this->defaultBranch($repo), $path)['content'] ?? null;
     }
 
+    /**
+     * An image of the default branch as raw bytes for the viewer (null when missing, too large or not a file).
+     *
+     * @throws GithubException
+     */
+    public function readImage(string $repo, string $path): ?string
+    {
+        $encoded = implode('/', array_map('rawurlencode', explode('/', $path)));
+
+        try {
+            $json = $this->get("/repos/{$repo}/contents/{$encoded}", ['ref' => $this->defaultBranch($repo)])->json();
+        } catch (GithubException $exception) {
+            if ($exception->getCode() === 404) {
+                return null;
+            }
+
+            throw $exception;
+        }
+
+        if (! is_array($json) || ($json['type'] ?? null) !== 'file' || (int) ($json['size'] ?? 0) > ImageFiles::MAX_BYTES) {
+            return null;
+        }
+
+        $bytes = base64_decode(str_replace("\n", '', (string) ($json['content'] ?? '')), true);
+
+        return $bytes === false || $bytes === '' ? null : $bytes;
+    }
+
     /** @return array<string, int> path => size of the text-like files of the tree */
     private function tree(string $repo, string $branch): array
     {

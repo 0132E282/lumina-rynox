@@ -37,6 +37,9 @@ final class CliLlmClient implements LlmClient
         $directory = storage_path('app/ai-cli');
         File::ensureDirectoryExists($directory);
 
+        // * PHP's own max_execution_time (30 s by default) would cut the request before the CLI's own timeout does.
+        @set_time_limit(self::TIMEOUT_SECONDS + 15);
+
         try {
             $result = Process::path($directory)
                 ->timeout(self::TIMEOUT_SECONDS)
@@ -58,7 +61,7 @@ final class CliLlmClient implements LlmClient
                 $this->quotaHit($output) => AiException::QUOTA,
                 $result->exitCode() === 127 => AiException::CLI_NOT_FOUND,
                 default => AiException::CLI_UNAVAILABLE,
-            });
+            }, $this->quotaHit($output) ? QuotaLimit::parse($output) : null);
         }
 
         $text = trim($result->output());
@@ -73,7 +76,7 @@ final class CliLlmClient implements LlmClient
     /** Only the CLI's own plain messages about a limit: `usage limit reached`, `rate limit`, `insufficient_quota`, `credit balance is too low`. */
     private function quotaHit(string $output): bool
     {
-        return preg_match('~usage limit reached|rate[ _-]?limit|insufficient_quota|credit balance (is )?too low~i', $output) === 1;
+        return preg_match('~usage limit reached|(?:5-hour|weekly|daily|session|usage) limit reached|hit your (?:usage |session |weekly |daily )?limit|rate[ _-]?limit|insufficient_quota|credit balance (is )?too low~i', $output) === 1;
     }
 
     private function notLoggedIn(string $output): bool
@@ -92,12 +95,30 @@ final class CliLlmClient implements LlmClient
 
         return match ($this->vendor) {
             // * Print mode reads the prompt from stdin; the tools that edit files, run commands or reach the web are denied.
-            'anthropic' => ['claude', '-p', '--output-format', 'text', '--disallowedTools', 'Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch', ...($model === null ? [] : ['--model', $model])],
+            'anthropic' => ['claude', '-p', '--output-format', 'text', '--disallowedTools', 'Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch', ...$this->mcpArguments(), ...($model === null ? [] : ['--model', $model])],
             // * `-` reads the prompt from stdin; the read-only sandbox blocks writes and commands that change anything.
             'openai' => ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', ...($model === null ? [] : ['--model', $model]), '-'],
             // * The stdin text is appended to this fixed instruction.
             'google' => ['gemini', '-p', 'Trả lời đúng theo hướng dẫn và khối dữ liệu nhận qua stdin.', ...($model === null ? [] : ['--model', $model])],
             default => throw new AiException(AiException::CLI_UNSUPPORTED),
         };
+    }
+
+    /**
+     * * No MCP server unless the person switched it on for the picked project: with none on, the CLI loads none at all; otherwise every other known server is denied by name.
+     *
+     * @return list<string>
+     */
+    private function mcpArguments(): array
+    {
+        $allowed = app(McpPolicy::class)->allowed();
+
+        if ($allowed === []) {
+            return ['--strict-mcp-config'];
+        }
+
+        $denied = collect(app(ProjectTools::class)->mcpServers())->pluck('name')->diff($allowed)->map(fn (string $name): string => 'mcp__'.preg_replace('/[^A-Za-z0-9_-]/', '_', $name))->values()->all();
+
+        return $denied === [] ? [] : ['--disallowedTools', implode(',', $denied)];
     }
 }

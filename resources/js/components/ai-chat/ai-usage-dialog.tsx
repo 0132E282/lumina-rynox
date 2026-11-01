@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { AccountLimit } from '@/components/integrations/account-limit';
+import { vendorShortName } from '@/lib/ai-account';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -9,7 +10,9 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
+import { useCachedRequest } from '@/hooks/use-cached-request';
 import { api } from '@/lib/api';
+import { relativeTime } from '@/lib/relative-time';
 import { cn } from '@/lib/utils';
 import type { AiChatSelection, AiUsageAccount, AiUsageStats } from '@/types';
 
@@ -27,25 +30,8 @@ const STATUS: Record<string, { label: string; className: string }> = {
     disabled: { label: 'Đã tắt', className: 'text-muted-foreground' },
 };
 
-const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
-    ['day', 86_400],
-    ['hour', 3_600],
-    ['minute', 60],
-];
-
 const formatTokens = (value: number): string =>
     new Intl.NumberFormat('vi').format(value);
-
-/** * "5 phút trước" style time from an ISO string. */
-export function relativeTime(iso: string, now: number = Date.now()): string {
-    const seconds = Math.round((new Date(iso).getTime() - now) / 1000);
-    const formatter = new Intl.RelativeTimeFormat('vi', { numeric: 'auto' });
-    const [unit, size] = UNITS.find(
-        ([, size]) => Math.abs(seconds) >= size,
-    ) ?? ['second' as const, 1];
-
-    return formatter.format(Math.round(seconds / size), unit);
-}
 
 /** * "Thống kê AI": which account is in use and which one stopped on its limit. Loaded when opened (one GET), so the chat page itself costs no extra query. */
 export function AiUsageDialog({
@@ -58,26 +44,13 @@ export function AiUsageDialog({
     /** The composer's current account: marked "Đang dùng". */
     selection: AiChatSelection;
 }) {
-    const [stats, setStats] = useState<AiUsageStats | null>(null);
-    const [failed, setFailed] = useState(false);
-
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-
-        let cancelled = false;
-
-        setStats(null);
-        setFailed(false);
-        api.get<AiUsageStats>('/ai-chat/usage')
-            .then(({ data }) => !cancelled && setStats(data))
-            .catch(() => !cancelled && setFailed(true));
-
-        return () => {
-            cancelled = true;
-        };
-    }, [open]);
+    // * Shown from the cache at once and refreshed in the background after a minute (the server caches the same 60 s).
+    const { data: stats, failed } = useCachedRequest(
+        'usage',
+        60_000,
+        () => api.get<AiUsageStats>('/ai-chat/usage').then(({ data }) => data),
+        open,
+    );
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -190,7 +163,7 @@ function UsageRow({
                     )}
                 </span>
                 <span className="block truncate text-xs text-muted-foreground">
-                    {[account.vendor.split(' (')[0], account.model]
+                    {[vendorShortName(account.vendor), account.model]
                         .filter(Boolean)
                         .join(' · ')}
                 </span>
@@ -268,6 +241,12 @@ function UsageRow({
             </div>
             <span className={cn('w-full text-xs sm:w-44', status.className)}>
                 {status.label}
+                {account.limit.state === 'limited' && (
+                    <>
+                        {' · '}
+                        <AccountLimit limit={account.limit} inline />
+                    </>
+                )}
                 {account.status_at &&
                     account.status !== 'active' &&
                     ` · ${relativeTime(account.status_at)}`}

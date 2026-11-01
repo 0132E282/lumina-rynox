@@ -47,7 +47,7 @@ final class AiUsageStats
                 ->keyBy('ai_account_id');
 
             $overall = AiUsageLog::query()
-                ->selectRaw("ai_account_id, MAX(id) as last_id, MAX(CASE WHEN status = 'ok' THEN created_at END) as last_ok_at, MAX(CASE WHEN status = 'quota' THEN created_at END) as last_quota_at, MAX(CASE WHEN status = 'error' THEN created_at END) as last_error_at")
+                ->selectRaw("ai_account_id, MAX(id) as last_id, MAX(CASE WHEN status = 'quota' THEN id END) as last_quota_id, MAX(CASE WHEN status = 'ok' THEN created_at END) as last_ok_at, MAX(CASE WHEN status = 'quota' THEN created_at END) as last_quota_at, MAX(CASE WHEN status = 'error' THEN created_at END) as last_error_at")
                 ->groupBy('ai_account_id')
                 ->get()
                 ->keyBy('ai_account_id');
@@ -62,7 +62,11 @@ final class AiUsageStats
                 ->get()
                 ->groupBy('ai_account_id');
 
-            $models = AiUsageLog::query()->whereIn('id', $overall->pluck('last_id'))->pluck('model', 'ai_account_id');
+            // * One query for both the latest call (its model) and the latest quota stop (its limit scope and reset time).
+            $latest = AiUsageLog::query()
+                ->whereIn('id', $overall->pluck('last_id')->merge($overall->pluck('last_quota_id'))->filter()->unique()->values())
+                ->get(['id', 'ai_account_id', 'model', 'limit_scope', 'limit_reset_at'])
+                ->keyBy('id');
         } catch (QueryException) {
             // * The table is missing (migration not run yet): same as no data.
             return ['available' => false, 'accounts' => [], 'history' => $history];
@@ -71,7 +75,7 @@ final class AiUsageStats
         return [
             'available' => true,
             'history' => $history,
-            'accounts' => $accounts->map(function (AiAccount $account) use ($own, $overall, $models, $used): array {
+            'accounts' => $accounts->map(function (AiAccount $account) use ($own, $overall, $latest, $used): array {
                 $mine = $own->get($account->id);
                 $all = $overall->get($account->id);
                 [$status, $statusAt] = $this->status($account, $all?->last_ok_at, $all?->last_quota_at, $all?->last_error_at);
@@ -82,7 +86,7 @@ final class AiUsageStats
                     'vendor_key' => $account->vendor,
                     'vendor' => AiAccount::VENDORS[$account->vendor] ?? $account->vendor,
                     // * The model of the latest call, else the account's own.
-                    'model' => $models->get($account->id) ?? $account->model,
+                    'model' => $latest->get($all?->last_id)?->model ?? $account->model,
                     'enabled' => $account->enabled,
                     'calls_24h' => (int) ($mine?->calls_24h ?? 0),
                     'calls_7d' => (int) ($mine?->calls_7d ?? 0),
@@ -95,9 +99,58 @@ final class AiUsageStats
                     'models_used' => $used->get($account->id)?->pluck('model')->values()->all() ?? [],
                     'status' => $status,
                     'status_at' => $this->iso($statusAt),
+                    'limit' => $this->limit($all?->last_ok_at, $all?->last_quota_at, $latest->get($all?->last_quota_id)),
                 ];
             })->values()->all(),
         ];
+    }
+
+    /**
+     * The limit state of every account (two grouped queries), for the accounts table. Account-wide like the status: a quota stop is a fact about the account, whoever hit it.
+     *
+     * @return array<int, array{state: string, scope: string|null, reset_at: string|null}> by account id; empty before the table exists
+     */
+    public function limits(): array
+    {
+        try {
+            $overall = AiUsageLog::query()
+                ->selectRaw("ai_account_id, MAX(CASE WHEN status = 'quota' THEN id END) as last_quota_id, MAX(CASE WHEN status = 'ok' THEN created_at END) as last_ok_at, MAX(CASE WHEN status = 'quota' THEN created_at END) as last_quota_at")
+                ->groupBy('ai_account_id')
+                ->get();
+            $rows = AiUsageLog::query()->whereIn('id', $overall->pluck('last_quota_id')->filter()->values())->get(['id', 'limit_scope', 'limit_reset_at'])->keyBy('id');
+        } catch (QueryException) {
+            return [];
+        }
+
+        $limits = [];
+
+        foreach ($overall as $row) {
+            $limits[(int) $row->ai_account_id] = $this->limit($row->last_ok_at, $row->last_quota_at, $rows->get($row->last_quota_id));
+        }
+
+        return $limits;
+    }
+
+    /**
+     * Limited only while the latest quota stop is newer than the latest success and its stated reset time is unknown or still ahead. Scope and reset time come from the real error only.
+     *
+     * @return array{state: string, scope: string|null, reset_at: string|null}
+     */
+    private function limit(mixed $lastOk, mixed $lastQuota, ?AiUsageLog $row): array
+    {
+        $none = ['state' => 'ok', 'scope' => null, 'reset_at' => null];
+
+        if ($lastQuota === null || $row === null || ($lastOk !== null && $this->at($lastOk) >= $this->at($lastQuota))) {
+            return $none;
+        }
+
+        $reset = $row->limit_reset_at;
+
+        if ($reset !== null && $reset->lte(Carbon::now())) {
+            return $none;
+        }
+
+        return ['state' => 'limited', 'scope' => $row->limit_scope, 'reset_at' => $reset?->toIso8601String()];
     }
 
     /**

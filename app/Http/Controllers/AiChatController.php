@@ -20,8 +20,11 @@ use App\Services\Ai\EditProposalExtractor;
 use App\Services\Ai\GithubException;
 use App\Services\Ai\GithubReader;
 use App\Services\Ai\GithubWriter;
+use App\Services\Ai\ImageFiles;
 use App\Services\Ai\LocalWorkspace;
 use App\Services\Ai\LocalWorkspaceException;
+use App\Services\Ai\McpPolicy;
+use App\Services\Ai\ProjectTools;
 use App\Services\Integrations\IntegrationManager;
 use App\Support\LineDiff;
 use App\Support\ResourcePermission;
@@ -52,7 +55,7 @@ class AiChatController extends Controller
     /** `repo` of a proposal aimed at a local folder is `local:{root id}`. */
     private const LOCAL_PREFIX = 'local:';
 
-    public function __construct(private readonly AiAssistant $assistant, private readonly GithubReader $github, private readonly GithubWriter $githubWriter, private readonly ChatAttachmentReader $attachments, private readonly EditProposalExtractor $extractor, private readonly IntegrationManager $integrations, private readonly LocalWorkspace $workspace) {}
+    public function __construct(private readonly AiAssistant $assistant, private readonly GithubReader $github, private readonly GithubWriter $githubWriter, private readonly ChatAttachmentReader $attachments, private readonly EditProposalExtractor $extractor, private readonly IntegrationManager $integrations, private readonly LocalWorkspace $workspace, private readonly ProjectTools $tools) {}
 
     /** * Without `ai.use` the home page has nothing to show, so the person goes to the dashboard instead of a 403 right after login. */
     public function index(Request $request): Response|RedirectResponse
@@ -154,7 +157,17 @@ class AiChatController extends Controller
             'path' => ['required', 'string', 'max:300', 'not_regex:#(^|/)\.\.(/|$)#', 'not_regex:#^/#'],
         ]);
 
+        $mime = ImageFiles::mime($data['path']);
+
         try {
+            if ($mime !== null) {
+                $bytes = $this->github->readImage($data['repo'], $data['path']);
+
+                return $bytes === null
+                    ? response()->json(['message' => 'Không xem được ảnh này (quá lớn hoặc không đọc được, tối đa 1 MB).'], 422)
+                    : response()->json(['path' => $data['path'], 'image' => ImageFiles::dataUrl($mime, $bytes)]);
+            }
+
             $content = $this->github->readFile($data['repo'], $data['path']);
         } catch (GithubException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
@@ -216,8 +229,10 @@ class AiChatController extends Controller
 
         $repo = $request->validated('repo');
         $localRoot = $request->validated('local_root');
+        $extraRepos = $request->validated('extra_repos') ?? [];
+        $extraRoots = $request->validated('extra_local_roots') ?? [];
 
-        if ($localRoot !== null) {
+        if ($localRoot !== null || $extraRoots !== []) {
             if (! ResourcePermission::allows($user, 'ai', 'local-read')) {
                 return response()->json(['message' => 'Bạn chưa có quyền đọc tệp local.'], 403);
             }
@@ -238,13 +253,33 @@ class AiChatController extends Controller
                 $notes[] = 'GitHub: '.$repo;
             }
 
+            // * More projects picked together are context only: edits are proposed against the first one.
+            foreach ($extraRoots as $extraRoot) {
+                $sections[] = $this->workspace->context($extraRoot, $text);
+                $notes[] = 'Local: '.$extraRoot;
+            }
+
+            foreach ($extraRepos as $extraRepo) {
+                $sections[] = $this->github->context($extraRepo, $text);
+                $notes[] = 'GitHub: '.$extraRepo;
+            }
+
+            // * Only the skills, subagents and MCP servers switched on for the picked projects reach the AI; every other MCP server stays blocked.
+            $picked = array_values(array_filter([$localRoot === null ? null : self::LOCAL_PREFIX.$localRoot, $repo, ...array_map(fn (string $root): string => self::LOCAL_PREFIX.$root, $extraRoots), ...$extraRepos]));
+            $tools = $this->tools->forChat($user, $picked, ResourcePermission::allows($user, 'ai', 'local-read') && $this->workspace->refusal($request) === null, $text);
+            app(McpPolicy::class)->allow($tools['mcp']);
+
+            if ($tools['section'] !== null) {
+                $sections[] = $tools['section'];
+            }
+
             $answer = Str::limit($this->assistant->chat(
                 $history,
                 $text,
                 $request->validated('ai_account_id') === null ? null : (int) $request->validated('ai_account_id'),
                 $request->validated('ai_model'),
                 $sections === [] ? null : implode("\n\n", $sections),
-                $repo !== null || $localRoot !== null,
+                $repo !== null || $localRoot !== null || $extraRepos !== [] || $extraRoots !== [],
                 $request->validated('mode') ?? AiAssistant::MODE_AUTO,
                 $this->promptProfile($user),
             ), AiMessage::MAX_CONTENT_LENGTH, '');

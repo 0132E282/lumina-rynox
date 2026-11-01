@@ -6,6 +6,7 @@ use App\Http\Controllers\AiAccountController;
 use App\Http\Controllers\AiChatController;
 use App\Http\Controllers\AiChatSettingsController;
 use App\Http\Controllers\AiController;
+use App\Http\Controllers\AiProjectToolsController;
 use App\Http\Controllers\ApiKeyController;
 use App\Http\Controllers\AppPasswordController;
 use App\Http\Controllers\CalendarController;
@@ -55,9 +56,15 @@ Route::middleware(['auth', 'web'])->group(function () {
     Route::delete('ai-chat/settings/avatar', [AiChatSettingsController::class, 'removeAvatar'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-settings'])->name('ai-chat.settings.avatar.remove');
     // * "Máy local": off by default (`config/ai-chat.php`); reads need `ai.local-read`, applying an approved edit needs `ai.local-write`.
     Route::get('ai-chat/local/status', [LocalWorkspaceController::class, 'status'])->middleware(AuthorizeResource::class.':ai,use')->name('ai-chat.local.status');
+    Route::post('ai-chat/local/projects', [LocalWorkspaceController::class, 'storeProject'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:10,1,ai-local-import'])->name('ai-chat.local.projects.store');
+    Route::delete('ai-chat/local/projects/{key}', [LocalWorkspaceController::class, 'destroyProject'])->where('key', '[a-z0-9_-]{1,40}')->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-import'])->name('ai-chat.local.projects.destroy');
     Route::get('ai-chat/local/tree', [LocalWorkspaceController::class, 'tree'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:30,1,ai-local'])->name('ai-chat.local.tree');
     Route::get('ai-chat/local/file', [LocalWorkspaceController::class, 'file'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:60,1,ai-local'])->name('ai-chat.local.file');
     Route::post('ai-chat/messages/{message}/proposals/apply-local', [AiChatController::class, 'applyLocalProposals'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-write'])->name('ai-chat.proposals.apply-local');
+    // * Per-project skills, subagents and MCP servers (all off by default); creating a skill or subagent writes into a local project, so it needs `ai.local-write`.
+    Route::get('ai-chat/tools', [AiProjectToolsController::class, 'index'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-tools'])->name('ai-chat.tools.index');
+    Route::put('ai-chat/tools', [AiProjectToolsController::class, 'toggle'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:60,1,ai-tools'])->name('ai-chat.tools.toggle');
+    Route::post('ai-chat/tools', [AiProjectToolsController::class, 'store'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:10,1,ai-tools-create'])->name('ai-chat.tools.store');
     Route::post('ai-chat/optimize', [AiChatController::class, 'optimize'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai'])->name('ai-chat.optimize');
     Route::get('system', [SystemController::class, 'index'])->name('system.index');
     Route::get('activity-logs', [ActivityLogController::class, 'index'])->name('activity-logs.index');

@@ -12,7 +12,7 @@ export type ActivityEntry = {
 
 const PREFIX = { info: '›', ok: '✓', error: '✗' } as const;
 
-/** * Read-only terminal-style log of what this chat page did (sends, repo reads, pull requests). It runs nothing and takes no input. */
+/** * Read-only terminal-style log (a side-panel column) of what this chat page did (sends, repo reads, pull requests). It runs nothing and takes no input. */
 export function ActivityTerminal({
     entries,
     onClear,
@@ -29,9 +29,10 @@ export function ActivityTerminal({
     }, [entries.length]);
 
     return (
+        // * Fills the side panel it sits in (a column beside the chat, like an editor's terminal dock).
         <section
             aria-label="Nhật ký hoạt động"
-            className="flex h-56 shrink-0 flex-col border-t bg-zinc-950 text-zinc-200"
+            className="flex h-full min-h-0 flex-col bg-zinc-950 text-zinc-200"
         >
             <header className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 px-3 text-xs text-zinc-400">
                 <span>Terminal · chỉ đọc</span>

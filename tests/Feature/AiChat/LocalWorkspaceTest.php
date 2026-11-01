@@ -8,6 +8,7 @@ use App\Models\Admin;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
 use App\Services\Ai\AiAssistant;
+use App\Services\Ai\ImageFiles;
 use App\Services\Ai\LocalWorkspace;
 use App\Services\Ai\LocalWorkspaceException;
 use Illuminate\Support\Facades\File;
@@ -169,6 +170,17 @@ class LocalWorkspaceTest extends AiTestCase
 
         $this->file($user, 'big.txt')->assertStatus(422);
         $this->file($user, 'bin.dat')->assertStatus(422);
+    }
+
+    public function test_an_image_is_returned_as_a_data_url_and_a_large_one_is_refused(): void
+    {
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHnOcQAAAAABJRU5ErkJggg==', true);
+        file_put_contents($this->root.'/pixel.png', $png);
+        file_put_contents($this->root.'/huge.png', str_repeat('a', ImageFiles::MAX_BYTES + 1));
+        $user = $this->admin();
+
+        $this->file($user, 'pixel.png')->assertOk()->assertJsonPath('image', 'data:image/png;base64,'.base64_encode($png))->assertJsonMissingPath('content');
+        $this->file($user, 'huge.png')->assertStatus(422);
     }
 
     public function test_an_unknown_root_is_not_found(): void

@@ -44,6 +44,15 @@ abstract class ApiLlmClient implements LlmClient
         return false;
     }
 
+    /** The scope and reset time a limit response states: its `Retry-After`/`retry_after` and error message are only parsed, never kept. */
+    private function limitOf(Response $response): QuotaLimit
+    {
+        $message = $response->json('error.message');
+        $field = $response->json('error.retry_after') ?? $response->json('retry_after');
+
+        return QuotaLimit::parse(is_string($message) ? $message : '', $response->header('Retry-After') ?: (is_int($field) || is_string($field) ? (string) $field : null));
+    }
+
     public function complete(string $system, string $prompt): string
     {
         try {
@@ -62,7 +71,7 @@ abstract class ApiLlmClient implements LlmClient
 
         // * Quota only from a real signal: HTTP 429 (rate limit) or 402 (payment required), or the vendor's own error code/type saying so.
         if (in_array($response->status(), [402, 429], true) || (! $response->successful() && $this->quotaCode($response))) {
-            throw new AiException(AiException::QUOTA);
+            throw new AiException(AiException::QUOTA, $this->limitOf($response));
         }
 
         if (! $response->successful()) {

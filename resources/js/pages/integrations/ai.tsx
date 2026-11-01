@@ -1,4 +1,5 @@
 import { Head, Link, router } from '@inertiajs/react';
+import { invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import { ArrowLeft } from 'lucide-react';
 import { useState } from 'react';
 import { useConfirm } from '@/components/confirm-dialog';
@@ -28,7 +29,11 @@ export default function AiIntegration({
 
     const run = (visit: (onFinish: () => void) => void) => {
         setWorking(true);
-        visit(() => setWorking(false));
+        visit(() => {
+            // * Account writes change the AI usage stats shown in the chat.
+            invalidateAiChatCache('usage');
+            setWorking(false);
+        });
     };
 
     const remove = async (account: AiAccountSummary) => {

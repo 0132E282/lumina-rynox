@@ -9,6 +9,7 @@ use App\Models\Integration;
 use App\Models\Mailbox;
 use App\Models\MessengerAccount;
 use App\Models\ZaloAccount;
+use App\Services\Ai\AiUsageStats;
 use App\Services\Chat\Messenger\MessengerChannel;
 use App\Services\Chat\Zalo\ZaloChannel;
 use Illuminate\Database\QueryException;
@@ -158,6 +159,8 @@ class IntegrationManager
             return [];
         }
 
+        $limits = app(AiUsageStats::class)->limits();
+
         return $accounts->map(fn (AiAccount $account): array => [
             'id' => $account->id,
             'name' => $account->name,
@@ -171,6 +174,7 @@ class IntegrationManager
             'purposes' => $account->purposes ?? array_keys(AiAccount::PURPOSES),
             'priority' => $account->priority,
             'token_mask' => $account->maskedToken(),
+            'limit' => $limits[$account->id] ?? ['state' => 'ok', 'scope' => null, 'reset_at' => null],
         ])->values()->all();
     }
 

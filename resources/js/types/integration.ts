@@ -61,6 +61,13 @@ export type MessengerAccountPermission = {
     default: boolean;
 };
 
+/** * From real provider errors only: limited while the latest quota stop is newer than the latest success and its stated reset time is unknown or ahead. */
+export type AiAccountLimit = {
+    state: 'limited' | 'ok';
+    scope: 'day' | 'week' | null;
+    reset_at: string | null;
+};
+
 /** * One AI account on the AI integration page. The token never reaches the client: only its 4-character mask. */
 export type AiAccountSummary = {
     id: number;
@@ -76,6 +83,7 @@ export type AiAccountSummary = {
     purposes: string[];
     priority: number;
     token_mask: string | null;
+    limit: AiAccountLimit;
 };
 
 export type AiOptions = {

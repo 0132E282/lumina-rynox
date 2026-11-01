@@ -4,7 +4,13 @@ declare(strict_types=1);
 
 namespace App\Services\Ai;
 
+use App\Models\AiLocalRoot;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 /**
  * Read and (after the person's approval) write text files inside a few configured folders of this machine.
@@ -21,6 +27,19 @@ class LocalWorkspace
     public const MAX_TREE_ENTRIES = 2000;
 
     public const MAX_DEPTH = 12;
+
+    public const MAX_PROJECTS = 10;
+
+    public const MAX_FOLDERS_PER_PROJECT = 5;
+
+    /** Folder names (any level) an imported root may not be or sit inside. */
+    private const SENSITIVE_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.config', '.azure', '.gcloud', '.npm', '.cache', '.local', '.trash', 'library', 'appdata'];
+
+    /** System locations refused even if a base were set too wide. */
+    private const SYSTEM_PREFIXES = ['/etc', '/proc', '/sys', '/dev', '/boot', '/root', '/bin', '/sbin', '/usr', '/system'];
+
+    /** @var array<int, array<string, string>> */
+    private array $rootCache = [];
 
     private const DENIED_DIRECTORIES = ['.git', 'storage', 'vendor', 'node_modules'];
 
@@ -42,16 +61,219 @@ class LocalWorkspace
         return in_array($request->server('REMOTE_ADDR'), ['127.0.0.1', '::1'], true) ? null : LocalWorkspaceException::NOT_LOOPBACK;
     }
 
-    /** @return list<array{id: string}> only ids: the folders' paths stay on the server */
+    /**
+     * The roots the signed-in person may use: id and a label only (the folders' paths stay on the server).
+     * `folder` is a masked tail ("…/name") for imported folders, null for the folders set up in `.env`.
+     *
+     * @return list<array{id: string, label: string, imported: bool, folder: string|null}>
+     */
     public function roots(): array
     {
-        return array_map(fn (string $id): array => ['id' => $id], array_keys($this->configuredRoots()));
+        $imported = $this->importedRows()->keyBy('key');
+        $rows = [];
+
+        foreach ($this->configuredRoots() as $id => $path) {
+            $row = $imported->get($id);
+            $rows[] = ['id' => $id, 'label' => $row === null ? $id : $row->project, 'imported' => $row !== null, 'folder' => $row === null ? null : '…/'.basename($path)];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * The person's imported projects with their folders (masked), for the import dialog.
+     *
+     * @return list<array{key: string, name: string, folders: list<array{id: string, folder: string}>}>
+     */
+    public function projects(): array
+    {
+        $usable = $this->configuredRoots();
+        $projects = [];
+
+        foreach ($this->importedRows() as $row) {
+            if (! isset($usable[$row->key])) {
+                continue;
+            }
+
+            $projects[$row->project] ??= ['key' => $row->key, 'name' => $row->project, 'folders' => []];
+            $projects[$row->project]['folders'][] = ['id' => $row->key, 'folder' => '…/'.basename($usable[$row->key])];
+        }
+
+        return array_values($projects);
+    }
+
+    /**
+     * Adds a project with one to five folders for the signed-in person.
+     * ! Every folder: absolute, no `..`/control characters, no link anywhere in the path (it must equal its realpath), an existing directory, inside an allowed base (never the base itself) and outside the sensitive folders.
+     *
+     * @param  list<string>  $folders
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function importProject(string $name, array $folders): void
+    {
+        $userId = (int) Auth::id();
+
+        if ($folders === [] || count($folders) > self::MAX_FOLDERS_PER_PROJECT) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::TOO_MANY_FOLDERS, 422, 'folders');
+        }
+
+        $existing = AiLocalRoot::query()->where('user_id', $userId)->get(['project', 'key']);
+
+        if ($existing->pluck('project')->unique()->count() >= self::MAX_PROJECTS) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::TOO_MANY_PROJECTS, 422, 'name');
+        }
+
+        $base = Str::limit(trim(Str::slug($name), '-'), 34, '');
+        $base = $base === '' ? 'project' : $base;
+        $keys = count($folders) === 1 ? [$base] : array_map(fn (int $n): string => $n === 0 ? $base : "{$base}-".($n + 1), array_keys($folders));
+        $taken = array_merge(array_keys((array) config('ai-chat.local_workspace.roots', [])), $existing->pluck('key')->all());
+
+        if ($existing->contains('project', $name) || array_intersect($keys, $taken) !== []) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::NAME_TAKEN, 422, 'name');
+        }
+
+        $paths = [];
+
+        foreach ($folders as $folder) {
+            $real = $this->importableFolder($folder);
+
+            if (in_array($real, $paths, true)) {
+                throw new LocalWorkspaceException(LocalWorkspaceException::FOLDER_DUPLICATE, 422, 'folders');
+            }
+
+            $paths[] = $real;
+        }
+
+        DB::transaction(function () use ($userId, $name, $keys, $paths): void {
+            foreach ($paths as $index => $path) {
+                AiLocalRoot::query()->create(['user_id' => $userId, 'project' => $name, 'key' => $keys[$index], 'path' => $path]);
+            }
+        });
+        unset($this->rootCache[$userId]);
+    }
+
+    /**
+     * Removes the whole project that owns `$key`, only among the signed-in person's own rows.
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function removeProject(string $key): void
+    {
+        $userId = (int) Auth::id();
+        $row = AiLocalRoot::query()->where('user_id', $userId)->where('key', $key)->first() ?? throw new LocalWorkspaceException(LocalWorkspaceException::UNKNOWN_ROOT, 404);
+
+        AiLocalRoot::query()->where('user_id', $userId)->where('project', $row->project)->delete();
+        unset($this->rootCache[$userId]);
+    }
+
+    /** * Realpath of a folder the person may import, or a refusal with a fixed message. */
+    public function importableFolder(string $folder): string
+    {
+        $path = rtrim($folder, '/');
+
+        if ($path === '' || strlen($folder) > 500 || preg_match('/[\x00-\x1f\x7f\\\\]/', $folder) === 1 || ! str_starts_with($path, '/') || in_array('..', explode('/', $path), true)) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::BAD_FOLDER, 422, 'folders');
+        }
+
+        $real = realpath($path);
+
+        if ($real === false || ! is_dir($real)) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::BAD_FOLDER, 422, 'folders');
+        }
+
+        if ($real !== $path) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::FOLDER_LINK, 422, 'folders');
+        }
+
+        if ($this->locationRefused($real)) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::FOLDER_NOT_ALLOWED, 422, 'folders');
+        }
+
+        return $real;
+    }
+
+    /** * True when the (already resolved) folder is outside the allowed bases, is a base itself, a system location or inside a sensitive folder. */
+    private function locationRefused(string $real): bool
+    {
+        foreach (self::SYSTEM_PREFIXES as $prefix) {
+            if ($real === $prefix || str_starts_with($real, $prefix.'/')) {
+                return true;
+            }
+        }
+
+        foreach (explode('/', strtolower($real)) as $segment) {
+            if (in_array($segment, self::SENSITIVE_FOLDERS, true) || str_starts_with($segment, '.env')) {
+                return true;
+            }
+        }
+
+        foreach ($this->importBases() as $base) {
+            if (str_starts_with($real, $base.'/')) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** @return list<string> realpaths of the allowed bases; the home folder when none is configured */
+    private function importBases(): array
+    {
+        $configured = (array) config('ai-chat.local_workspace.import_bases', []);
+        $bases = $configured === [] ? [(string) getenv('HOME')] : array_map('strval', $configured);
+        $resolved = [];
+
+        foreach ($bases as $base) {
+            $real = $base === '' ? false : realpath($base);
+
+            if ($real !== false && $real !== '/') {
+                $resolved[] = rtrim($real, '/');
+            }
+        }
+
+        return $resolved;
+    }
+
+    /** @return Collection<int, AiLocalRoot> */
+    private function importedRows(): Collection
+    {
+        try {
+            return AiLocalRoot::query()->where('user_id', Auth::id())->orderBy('id')->get();
+        } catch (QueryException) {
+            // * The table does not exist yet (migration not run): no imported roots.
+            return new Collection;
+        }
+    }
+
+    /**
+     * Env roots plus the person's own imported ones. Imported folders are re-checked against the location policy on every use.
+     *
+     * @return array<string, string>
+     */
+    private function configuredRoots(): array
+    {
+        $userId = (int) Auth::id();
+
+        return $this->rootCache[$userId] ??= $this->resolveRoots();
     }
 
     /** @return array<string, string> */
-    private function configuredRoots(): array
+    private function resolveRoots(): array
     {
-        return array_filter((array) config('ai-chat.local_workspace.roots', []), fn (mixed $path, mixed $id): bool => is_string($path) && is_string($id) && realpath($path) !== false && is_dir($path), ARRAY_FILTER_USE_BOTH);
+        $roots = array_filter((array) config('ai-chat.local_workspace.roots', []), fn (mixed $path, mixed $id): bool => is_string($path) && is_string($id) && realpath($path) !== false && is_dir($path), ARRAY_FILTER_USE_BOTH);
+
+        foreach ($this->importedRows() as $row) {
+            $real = realpath($row->path);
+
+            if (isset($roots[$row->key]) || $real === false || ! is_dir($real) || $this->locationRefused($real)) {
+                continue;
+            }
+
+            $roots[$row->key] = $real;
+        }
+
+        return $roots;
     }
 
     /** @throws LocalWorkspaceException */
@@ -175,6 +397,29 @@ class LocalWorkspace
         }
 
         return $content;
+    }
+
+    /**
+     * Raw bytes of one allowed image (same guards as `read`: denied names, links leaving the root, size limit).
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function readImage(string $rootId, string $path): string
+    {
+        $full = $this->existingFile($rootId, $path);
+        $size = filesize($full);
+
+        if ($size === false || $size > ImageFiles::MAX_BYTES) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::TOO_LARGE);
+        }
+
+        $bytes = file_get_contents($full);
+
+        if ($bytes === false) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::NOT_TEXT);
+        }
+
+        return $bytes;
     }
 
     /** * Hash of the file's current content, or null when it does not exist (a new file). */
@@ -306,6 +551,31 @@ class LocalWorkspace
         }
 
         return $full;
+    }
+
+    /**
+     * Make sure a folder (and its parents) exists inside the root, one segment at a time and never through a link. Used only for fixed folders of the app (`.agents/skills/<name>`).
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function ensureFolder(string $rootId, string $relative): void
+    {
+        $root = $this->rootPath($rootId);
+        $current = $root;
+
+        foreach (explode('/', $this->normalise($relative) ?? throw new LocalWorkspaceException(LocalWorkspaceException::BAD_PATH)) as $segment) {
+            $current .= DIRECTORY_SEPARATOR.$segment;
+
+            if (is_link($current)) {
+                throw new LocalWorkspaceException(LocalWorkspaceException::BAD_PATH);
+            }
+
+            if (! is_dir($current) && ! @mkdir($current, 0755)) {
+                throw new LocalWorkspaceException(LocalWorkspaceException::WRITE_FAILED, 500);
+            }
+        }
+
+        $this->assertInside($root, (string) realpath($current));
     }
 
     /** * Realpath of the folder that holds (or will hold) the file; it must exist and sit inside the root. */
