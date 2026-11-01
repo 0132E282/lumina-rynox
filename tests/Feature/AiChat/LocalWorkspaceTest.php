@@ -58,7 +58,7 @@ class LocalWorkspaceTest extends AiTestCase
         {
             public function __construct(private readonly string $answer) {}
 
-            public function chat(array $history, string $message, ?int $accountId = null, ?string $model = null, ?string $context = null, bool $allowEdits = false, string $mode = AiAssistant::MODE_AUTO): string
+            public function chat(array $history, string $message, ?int $accountId = null, ?string $model = null, ?string $context = null, bool $allowEdits = false, string $mode = AiAssistant::MODE_AUTO, array $profile = []): string
             {
                 return $this->answer;
             }

@@ -30,6 +30,20 @@ abstract class ApiLlmClient implements LlmClient
         $this->model = filled($model) ? $model : static::DEFAULT_MODEL;
     }
 
+    /** The error `code`/`type` fields (never the message text) name a quota or rate-limit stop: `insufficient_quota`, `rate_limit_exceeded`, `rate_limit_error`. */
+    private function quotaCode(Response $response): bool
+    {
+        foreach (['error.code', 'error.type'] as $key) {
+            $value = $response->json($key);
+
+            if (is_string($value) && preg_match('/insufficient_quota|rate_limit/i', $value) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function complete(string $system, string $prompt): string
     {
         try {
@@ -46,7 +60,8 @@ abstract class ApiLlmClient implements LlmClient
             throw new AiException(AiException::UNAUTHORIZED);
         }
 
-        if ($response->status() === 429) {
+        // * Quota only from a real signal: HTTP 429 (rate limit) or 402 (payment required), or the vendor's own error code/type saying so.
+        if (in_array($response->status(), [402, 429], true) || (! $response->successful() && $this->quotaCode($response))) {
             throw new AiException(AiException::QUOTA);
         }
 

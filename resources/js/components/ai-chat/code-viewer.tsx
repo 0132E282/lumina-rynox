@@ -6,6 +6,8 @@ import {
 } from '@/actions/App/Http/Controllers/AiChatController';
 import { Button } from '@/components/ui/button';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
+import { cachedRequest } from '@/lib/ai-chat-cache';
+import { requestErrorMessage } from '@/lib/ai-error';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { useResizableWidth } from '@/hooks/use-resizable-width';
 import type { AiChatProposal } from '@/types';
@@ -36,12 +38,7 @@ type TreeNode = {
     children: TreeNode[] | null;
 };
 
-function errorText(caught: unknown, fallback: string): string {
-    return (
-        (caught as { response?: { data?: { message?: string } } }).response
-            ?.data?.message ?? fallback
-    );
-}
+const errorText = requestErrorMessage;
 
 // * Folders first, then files, each alphabetically.
 function buildTree(paths: string[]): TreeNode[] {
@@ -221,14 +218,23 @@ export function CodeViewer({
         let cancelled = false;
 
         // * "local:{id}" is a folder of this machine (read-only here); anything else is a GitHub repo.
-        const request = localRoot
-            ? api.get<{ paths: string[] }>('/ai-chat/local/tree', {
-                  params: { root: localRoot },
-              })
-            : api.get<{ paths: string[] }>(treeRoute.url({ query: { repo } }));
+        // * The tree of a repo is fetched once and kept a few minutes: closing and reopening the viewer, or switching tabs, does not refetch it.
+        const request = cachedRequest(
+            `tree.${repo}`,
+            localRoot ? 30_000 : 5 * 60 * 1000,
+            () =>
+                (localRoot
+                    ? api.get<{ paths: string[] }>('/ai-chat/local/tree', {
+                          params: { root: localRoot },
+                      })
+                    : api.get<{ paths: string[] }>(
+                          treeRoute.url({ query: { repo } }),
+                      )
+                ).then(({ data }) => data.paths),
+        );
 
         request
-            .then(({ data }) => !cancelled && setPaths(data.paths))
+            .then((rows) => !cancelled && setPaths(rows))
             .catch((caught) => {
                 if (!cancelled) {
                     setPaths([]);
@@ -317,14 +323,24 @@ export function CodeViewer({
         }
 
         try {
-            const { data } = await api.get<{ content: string }>(
-                localRoot
-                    ? '/ai-chat/local/file'
-                    : fileRoute.url({ query: { repo, path } }),
-                localRoot ? { params: { root: localRoot, path } } : undefined,
-            );
+            // * A file read stays cached for a minute so clicking back and forth does not burn the per-minute budget (a local file may change, so it is not cached).
+            const load = () =>
+                api
+                    .get<{ content: string }>(
+                        localRoot
+                            ? '/ai-chat/local/file'
+                            : fileRoute.url({ query: { repo, path } }),
+                        localRoot
+                            ? { params: { root: localRoot, path } }
+                            : undefined,
+                    )
+                    .then(({ data }) => data.content);
 
-            setContent(data.content);
+            setContent(
+                localRoot
+                    ? await load()
+                    : await cachedRequest(`file.${repo}.${path}`, 60_000, load),
+            );
         } catch (caught) {
             setFileError(errorText(caught, 'Không mở được tệp.'));
         }

@@ -1,12 +1,17 @@
 import { Link } from '@inertiajs/react';
-import { ChevronDown, ChevronRight, Lock } from 'lucide-react';
+import { ChevronDown, ChevronRight, Lock, Plus } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { repos as reposRoute } from '@/actions/App/Http/Controllers/AiChatController';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
+import { cachedRequest } from '@/lib/ai-chat-cache';
+import { requestErrorMessage } from '@/lib/ai-error';
+import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
 import { cn } from '@/lib/utils';
 import { home } from '@/routes';
 import type { AiChatConversation, AiChatRepo } from '@/types';
+
+const REPOS_TTL_MS = 5 * 60 * 1000;
 
 /** * "Code" tab: the GitHub repos the token can read; picking one selects it for the chat and opens its code. */
 export function ProjectsTab({
@@ -37,18 +42,21 @@ export function ProjectsTab({
 
         let cancelled = false;
 
-        api.get<{ repos: AiChatRepo[] }>(reposRoute.url())
-            .then(({ data }) => !cancelled && setRepos(data.repos))
+        // * One shared request for the repo list (kept 5 minutes): switching tabs or opening a chat does not refetch it.
+        cachedRequest('github.repos', REPOS_TTL_MS, () =>
+            api
+                .get<{ repos: AiChatRepo[] }>(reposRoute.url())
+                .then(({ data }) => data.repos),
+        )
+            .then((rows) => !cancelled && setRepos(rows))
             .catch((caught) => {
                 if (!cancelled) {
                     setRepos([]);
                     setError(
-                        (
-                            caught as {
-                                response?: { data?: { message?: string } };
-                            }
-                        ).response?.data?.message ??
+                        requestErrorMessage(
+                            caught,
                             'Không tải được danh sách repo.',
+                        ),
                     );
                 }
             });
@@ -172,6 +180,23 @@ export function ProjectsTab({
                                     </button>
                                     {isOpen && (
                                         <ul className="mt-0.5 mb-1 ml-5 flex flex-col gap-0.5 border-l pl-2">
+                                            <li>
+                                                {/* * Same action as picking the project (a fresh chat for it); the name is plain text. */}
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        onSelect(row.full_name)
+                                                    }
+                                                    aria-label={`Cuộc trò chuyện mới trong ${row.full_name}`}
+                                                    className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
+                                                >
+                                                    <Plus
+                                                        aria-hidden="true"
+                                                        className="size-3.5 shrink-0"
+                                                    />
+                                                    Cuộc trò chuyện mới
+                                                </button>
+                                            </li>
                                             {chats.length === 0 ? (
                                                 <li className="px-2 py-1 text-xs text-muted-foreground">
                                                     Chưa có đoạn chat nào.
@@ -185,6 +210,7 @@ export function ProjectsTab({
                                                                     c: conversation.id,
                                                                 },
                                                             })}
+                                                            {...OPEN_CONVERSATION_VISIT}
                                                             onClick={onNavigate}
                                                             aria-current={
                                                                 conversation.id ===

@@ -4,6 +4,7 @@ use App\Http\Controllers\ActivityLogController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AiAccountController;
 use App\Http\Controllers\AiChatController;
+use App\Http\Controllers\AiChatSettingsController;
 use App\Http\Controllers\AiController;
 use App\Http\Controllers\ApiKeyController;
 use App\Http\Controllers\AppPasswordController;
@@ -46,6 +47,12 @@ Route::middleware(['auth', 'web'])->group(function () {
     Route::get('ai-chat/github/repos', [AiChatController::class, 'repos'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-github'])->name('ai-chat.github.repos');
     Route::get('ai-chat/github/tree', [AiChatController::class, 'tree'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-github'])->name('ai-chat.github.tree');
     Route::get('ai-chat/github/file', [AiChatController::class, 'file'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:60,1,ai-github'])->name('ai-chat.github.file');
+    Route::get('ai-chat/usage', [AiChatController::class, 'usage'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-usage'])->name('ai-chat.usage');
+    Route::put('ai-chat/settings', [AiChatSettingsController::class, 'update'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-settings'])->name('ai-chat.settings.update');
+    Route::delete('ai-chat/settings', [AiChatSettingsController::class, 'destroy'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-settings'])->name('ai-chat.settings.destroy');
+    Route::get('ai-chat/settings/avatar', [AiChatSettingsController::class, 'avatar'])->middleware(AuthorizeResource::class.':ai,use')->name('ai-chat.settings.avatar');
+    Route::post('ai-chat/settings/avatar', [AiChatSettingsController::class, 'uploadAvatar'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai-avatar'])->name('ai-chat.settings.avatar.upload');
+    Route::delete('ai-chat/settings/avatar', [AiChatSettingsController::class, 'removeAvatar'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-settings'])->name('ai-chat.settings.avatar.remove');
     // * "Máy local": off by default (`config/ai-chat.php`); reads need `ai.local-read`, applying an approved edit needs `ai.local-write`.
     Route::get('ai-chat/local/status', [LocalWorkspaceController::class, 'status'])->middleware(AuthorizeResource::class.':ai,use')->name('ai-chat.local.status');
     Route::get('ai-chat/local/tree', [LocalWorkspaceController::class, 'tree'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:30,1,ai-local'])->name('ai-chat.local.tree');

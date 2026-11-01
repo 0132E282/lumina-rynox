@@ -1,7 +1,16 @@
 import { Link, usePage } from '@inertiajs/react';
-import { MessageSquare, PanelLeft, Search, SquarePen } from 'lucide-react';
-import { useState } from 'react';
+import {
+    ChartColumn,
+    MessageSquare,
+    MoreVertical,
+    PanelLeft,
+    Search,
+    Settings,
+    SquarePen,
+} from 'lucide-react';
+import { memo, useState } from 'react';
 import { filterNavItems } from '@/components/nav-main';
+import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
 import { home } from '@/routes';
 import { Button } from '@/components/ui/button';
 import {
@@ -11,7 +20,9 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { ProjectsTab } from '@/components/ai-chat/projects-tab';
-import { VendorBadge } from '@/components/ai-chat/vendor-badge';
+import { RowActionsMenu } from '@/components/tables/row-actions-menu';
+import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
+import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { Input } from '@/components/ui/input';
 import type { NavigationConfig } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
@@ -26,9 +37,11 @@ const STATUS_LABELS: Record<string, string> = {
 /** * "New chat" button and the "Gần đây" list (latest conversations of the signed-in admin). */
 export type RecentsTab = 'chat' | 'projects';
 
-export function RecentsList({
+export const RecentsList = memo(function RecentsList({
     conversations,
     aiAccounts,
+    assistant,
+    account,
     activeId,
     onNavigate,
     onCollapse,
@@ -37,9 +50,15 @@ export function RecentsList({
     githubConnected,
     tab,
     onTabChange,
+    onOpenSettings,
+    onOpenStats,
 }: {
     conversations: AiChatConversation[];
     aiAccounts: AiChatAccount[];
+    /** * The assistant's name and avatar (the character), shown in the footer row. */
+    assistant: AssistantIdentity;
+    /** * The AI account answering now: the row's small second line and status dot. */
+    account?: AiChatAccount;
     activeId: string | null;
     onNavigate?: () => void;
     onCollapse?: () => void;
@@ -49,11 +68,21 @@ export function RecentsList({
     /** * Active tab, owned by the page (the Terminal only shows on "projects"). */
     tab: RecentsTab;
     onTabChange: (tab: RecentsTab) => void;
+    /** * Opens the chat-settings dialog ("Cài đặt chat"). */
+    onOpenSettings: () => void;
+    /** * Opens the "Thống kê AI" dialog. */
+    onOpenStats: () => void;
 }) {
     const { navigation } = usePage<{ navigation: NavigationConfig }>().props;
     const [search, setSearch] = useState('');
     const [searchOpen, setSearchOpen] = useState(false);
     const [filter, setFilter] = useState('');
+    // * Chat and Code chats are two separate things: the Chat tab (and its search) holds the chats without a repo, the Code tab those with one.
+    const scoped = conversations.filter((conversation) =>
+        tab === 'projects'
+            ? conversation.repo !== null
+            : conversation.repo === null,
+    );
     const query = search.trim().toLowerCase();
     const menuResults = query
         ? filterNavItems(
@@ -64,10 +93,10 @@ export function RecentsList({
           )
         : [];
     const chatResults = query
-        ? conversations.filter((conversation) =>
+        ? scoped.filter((conversation) =>
               conversation.title.toLowerCase().includes(query),
           )
-        : conversations;
+        : scoped;
     const recents = conversations.filter((conversation) =>
         conversation.title.toLowerCase().includes(filter.trim().toLowerCase()),
     );
@@ -195,6 +224,7 @@ export function RecentsList({
                                 href={home.url({
                                     query: { c: conversation.id },
                                 })}
+                                {...OPEN_CONVERSATION_VISIT}
                                 onClick={() => {
                                     closeSearch();
                                     onNavigate?.();
@@ -253,20 +283,19 @@ export function RecentsList({
                         <h2 className="px-2 text-xs font-medium text-muted-foreground">
                             Gần đây
                         </h2>
-                        {conversations.length === 0 ? (
+                        {scoped.length === 0 ? (
                             <p className="px-2 text-sm text-muted-foreground">
-                                {conversations.length === 0
-                                    ? 'Chưa có cuộc trò chuyện nào.'
-                                    : 'Không tìm thấy cuộc trò chuyện.'}
+                                Chưa có cuộc trò chuyện nào.
                             </p>
                         ) : (
                             <ul className="flex min-h-0 flex-col gap-0.5 overflow-y-auto">
-                                {conversations.map((conversation) => (
+                                {scoped.map((conversation) => (
                                     <li key={conversation.id}>
                                         <Link
                                             href={home.url({
                                                 query: { c: conversation.id },
                                             })}
+                                            {...OPEN_CONVERSATION_VISIT}
                                             onClick={onNavigate}
                                             aria-current={
                                                 conversation.id === activeId
@@ -290,40 +319,30 @@ export function RecentsList({
             </div>
             <section
                 aria-label="AI đang kết nối"
-                className="-mx-3 mt-auto -mb-3 flex min-h-[49px] flex-col justify-center border-t px-3"
+                className="-mx-3 mt-auto -mb-3 flex min-h-[49px] items-center gap-1 border-t px-3"
             >
                 {aiAccounts.length === 0 ? (
-                    <p className="px-2 text-sm text-muted-foreground">
+                    <p className="min-w-0 flex-1 px-2 text-sm text-muted-foreground">
                         Chưa kết nối AI nào.
                     </p>
                 ) : (
-                    <ul className="flex max-h-40 flex-col gap-0.5 overflow-y-auto">
-                        {aiAccounts.map((account) => (
-                            <li
-                                key={account.id}
-                                className="flex items-center gap-2 px-2 py-1 text-sm"
-                            >
-                                <VendorBadge
-                                    vendorKey={account.vendor_key}
-                                    fallback={account.vendor}
-                                    className="size-6"
-                                />
-                                <span className="min-w-0 flex-1 leading-tight">
-                                    <span className="block truncate">
-                                        {account.name}
-                                    </span>
-                                    <span className="block truncate text-xs text-muted-foreground">
-                                        {[
-                                            account.vendor.split(' (')[0],
-                                            account.model,
-                                            account.max_output_tokens !== null
-                                                ? `tối đa ${account.max_output_tokens.toLocaleString('vi-VN')} token`
-                                                : null,
-                                        ]
-                                            .filter(Boolean)
-                                            .join(' · ')}
-                                    </span>
+                    <div className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1 text-sm">
+                        <AssistantAvatar {...assistant} className="size-7" />
+                        <span className="min-w-0 flex-1 leading-tight">
+                            <span className="block truncate">
+                                {assistant.name || 'Trợ lý AI'}
+                            </span>
+                            {account && (
+                                <span className="block truncate text-xs text-muted-foreground">
+                                    {[
+                                        account.name,
+                                        account.vendor.split(' (')[0],
+                                    ].join(' · ')}
                                 </span>
+                            )}
+                        </span>
+                        {account && (
+                            <>
                                 <span
                                     aria-hidden="true"
                                     className={cn(
@@ -339,11 +358,41 @@ export function RecentsList({
                                     {STATUS_LABELS[account.status] ??
                                         account.status}
                                 </span>
-                            </li>
-                        ))}
-                    </ul>
+                            </>
+                        )}
+                    </div>
                 )}
+                <RowActionsMenu
+                    trigger={
+                        // * Vertical dots for this footer only; the shared default stays horizontal.
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-8"
+                            aria-label="Mở menu cài đặt chat"
+                        >
+                            <MoreVertical
+                                className="size-4"
+                                aria-hidden="true"
+                            />
+                        </Button>
+                    }
+                    triggerLabel="Mở menu cài đặt chat"
+                    items={[
+                        {
+                            label: 'Cài đặt chat',
+                            icon: Settings,
+                            onSelect: onOpenSettings,
+                        },
+                        {
+                            label: 'Thống kê',
+                            icon: ChartColumn,
+                            onSelect: onOpenStats,
+                        },
+                    ]}
+                />
             </section>
         </nav>
     );
-}
+});

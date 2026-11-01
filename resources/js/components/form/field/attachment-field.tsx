@@ -1,7 +1,7 @@
 import {
     Copy,
     FolderOpen,
-    MoreVertical,
+    MoreHorizontal,
     PencilLine,
     Trash2,
     Upload,
@@ -263,7 +263,7 @@ function AttachmentBox({
                             onClick={(e) => e.stopPropagation()}
                             className="absolute top-1 right-1 flex size-5 items-center justify-center rounded-full bg-background/90 text-muted-foreground shadow-sm hover:text-foreground"
                         >
-                            <MoreVertical className="size-3.5" />
+                            <MoreHorizontal className="size-3.5" />
                         </button>
                     }
                     items={menuOptions.map((option) => ({

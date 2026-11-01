@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { ChoiceCard } from '@/components/ai-chat/choice-card';
 import type { ChoiceHandlers } from '@/components/ai-chat/choice-card';
 import { CodeBlock } from '@/components/ai-chat/code-block';
+import { FileBlock } from '@/components/ai-chat/file-card';
 import { parseChoices } from '@/lib/choices-parser';
 import { parseDiff } from '@/lib/diff-parser';
 import type { DiffRow } from '@/lib/diff-parser';
@@ -26,6 +27,8 @@ const DIFF_LANGUAGES = new Set(['diff', 'patch']);
 
 type CodeInfo = {
     title: string;
+    /** Name from the block's `title="..."` meta only (never the language fallback). */
+    name: string | null;
     code: string;
     language: string | undefined;
     diffRows: DiffRow[] | null;
@@ -82,7 +85,7 @@ function readCodeBlock(
     const title =
         metaTitle || (diffRows && diffFileName(diffRows)) || language || 'code';
 
-    return { title, code, language, diffRows };
+    return { title, name: metaTitle ?? null, code, language, diffRows };
 }
 
 const baseComponents: Components = {
@@ -246,7 +249,7 @@ function buildComponents(choiceHandlers?: ChoiceHandlers): Components {
                 );
             }
 
-            return (
+            const block = (
                 <CodeBlock
                     title={info.title}
                     code={info.code}
@@ -255,6 +258,20 @@ function buildComponents(choiceHandlers?: ChoiceHandlers): Components {
                     {children}
                 </CodeBlock>
             );
+
+            // * A block that is a file (named, or a complete svg/html document, or a long block of a known type) becomes a file card; otherwise it stays the plain code block.
+            if (!info.diffRows && info.language !== 'diff') {
+                return (
+                    <FileBlock
+                        code={info.code}
+                        language={info.language}
+                        name={info.name}
+                        fallback={block}
+                    />
+                );
+            }
+
+            return block;
         },
     };
 }

@@ -13,6 +13,8 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
+import { cachedRequest } from '@/lib/ai-chat-cache';
+import { requestErrorMessage } from '@/lib/ai-error';
 import type { AiChatRepo } from '@/types';
 
 /** * GitHub button under the chat box: pick the repo the AI may read, or go connect GitHub. */
@@ -40,19 +42,18 @@ export function RepoPicker({
         setError(null);
 
         try {
-            const { data } = await api.get<{ repos: AiChatRepo[] }>(
-                reposRoute.url(),
+            // * Shares the Code tab's cached request (5 minutes).
+            setRepos(
+                await cachedRequest('github.repos', 5 * 60 * 1000, () =>
+                    api
+                        .get<{ repos: AiChatRepo[] }>(reposRoute.url())
+                        .then(({ data }) => data.repos),
+                ),
             );
-
-            setRepos(data.repos);
         } catch (caught) {
             setRepos([]);
             setError(
-                (
-                    caught as {
-                        response?: { data?: { message?: string } };
-                    }
-                ).response?.data?.message ?? 'Không tải được danh sách repo.',
+                requestErrorMessage(caught, 'Không tải được danh sách repo.'),
             );
         }
     };

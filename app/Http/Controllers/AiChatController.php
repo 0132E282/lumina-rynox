@@ -8,10 +8,12 @@ use App\Http\Requests\SendAiChatMessageRequest;
 use App\Models\Admin;
 use App\Models\AiAccount;
 use App\Models\AiChangeProposal;
+use App\Models\AiChatSetting;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
 use App\Services\Ai\AiAssistant;
 use App\Services\Ai\AiException;
+use App\Services\Ai\AiUsageStats;
 use App\Services\Ai\ApiLlmClient;
 use App\Services\Ai\ChatAttachmentReader;
 use App\Services\Ai\EditProposalExtractor;
@@ -26,6 +28,7 @@ use App\Support\ResourcePermission;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -69,14 +72,22 @@ class AiChatController extends Controller
                 ->map(fn (AiMessage $message): array => $this->messagePayload($message))->all();
         }
 
+        // * Closures: opening a conversation asks only for `activeConversation` and `messages`, so the recents, accounts and the rest are not even queried then.
+        $accounts = null;
+        $loadAccounts = function () use (&$accounts) {
+            return $accounts ??= AiAccount::query()->orderBy('priority')->orderBy('id')->get();
+        };
+
         return Inertia::render('ai-chat/index', [
-            'conversations' => $this->recents($user),
+            'conversations' => fn () => $this->recents($user),
             'activeConversation' => $active === null ? null : $this->conversationPayload($active),
             'messages' => $messages,
-            'aiAccounts' => $this->accountsPayload(),
-            'githubConnected' => $this->github->connected(),
-            'chatContext' => ['system_chars' => $this->assistant->chatSystemPromptLength(), 'window_tokens' => AiAssistant::CONTEXT_WINDOW_TOKENS],
-            'integrations' => ResourcePermission::allows($user, 'integrations', 'view') ? $this->integrationsPayload() : null,
+            'aiAccounts' => fn () => $this->accountsPayload($loadAccounts()),
+            'aiAccountList' => fn () => $this->accountListPayload($user, $loadAccounts()),
+            'githubConnected' => fn () => $this->github->connected(),
+            'settings' => fn () => AiChatSetting::payloadFor($user),
+            'chatContext' => fn () => ['system_chars' => $this->assistant->chatSystemPromptLength(), 'window_tokens' => AiAssistant::CONTEXT_WINDOW_TOKENS],
+            'integrations' => fn () => ResourcePermission::allows($user, 'integrations', 'view') ? $this->integrationsPayload() : null,
         ]);
     }
 
@@ -154,6 +165,12 @@ class AiChatController extends Controller
             : response()->json(['path' => $data['path'], 'content' => $content]);
     }
 
+    /** * "Thống kê AI": per-account usage (own call counts, shared status), loaded when the dialog opens so the page itself costs no extra query. */
+    public function usage(Request $request, AiUsageStats $stats): JsonResponse
+    {
+        return response()->json($stats->forUser((int) $request->user()->getKey()));
+    }
+
     /** * A clearer rewrite of the draft prompt; nothing is stored or sent anywhere else. */
     public function optimize(Request $request): JsonResponse
     {
@@ -229,6 +246,7 @@ class AiChatController extends Controller
                 $sections === [] ? null : implode("\n\n", $sections),
                 $repo !== null || $localRoot !== null,
                 $request->validated('mode') ?? AiAssistant::MODE_AUTO,
+                $this->promptProfile($user),
             ), AiMessage::MAX_CONTENT_LENGTH, '');
         } catch (AiException|GithubException|LocalWorkspaceException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
@@ -374,6 +392,18 @@ class AiChatController extends Controller
         });
     }
 
+    /**
+     * What personalises the prompt for this person (their own saved settings; their account name when no display name is set).
+     *
+     * @return array{name: string, custom_instructions: string|null, assistant_name: string|null}
+     */
+    private function promptProfile(Admin $user): array
+    {
+        $settings = AiChatSetting::forUser($user);
+
+        return ['name' => $settings?->display_name ?: $user->name, 'custom_instructions' => $settings?->custom_instructions, 'assistant_name' => $settings?->assistant_name];
+    }
+
     private function rootOf(AiChangeProposal $proposal): string
     {
         return substr($proposal->repo, strlen(self::LOCAL_PREFIX));
@@ -501,13 +531,49 @@ class AiChatController extends Controller
     }
 
     /**
+     * Every AI account with safe fields only (never the token, session or last error), for the chat-settings dialog. Links and switches are only offered with the Integrations permissions.
+     *
+     * @param  Collection<int, AiAccount>  $accounts
+     * @return array<string, mixed>
+     */
+    private function accountListPayload(Admin $user, Collection $accounts): array
+    {
+        return [
+            'accounts' => $accounts->map(fn (AiAccount $account): array => [
+                'id' => $account->id,
+                'name' => $account->name,
+                'vendor_key' => $account->vendor,
+                'vendor' => AiAccount::VENDORS[$account->vendor] ?? $account->vendor,
+                'status' => $account->status,
+                'enabled' => $account->enabled,
+                'priority' => $account->priority,
+                'purposes' => $account->purposes,
+                // * The same model list the composer offers for this account.
+                'models' => collect($account->pickableModels())->map(fn (string $label, string $id): array => ['id' => $id, 'label' => $label])->values()->all(),
+                'model' => $account->model,
+            ])->values()->all(),
+            'purposes' => collect(AiAccount::PURPOSES)->map(fn (string $label, string $key): array => ['key' => $key, 'label' => $label])->values()->all(),
+            'purpose_accounts' => $this->purposeAccounts(),
+            'can_view' => ResourcePermission::allows($user, 'integrations', 'view'),
+            'can_update' => ResourcePermission::allows($user, 'integrations', 'update'),
+        ];
+    }
+
+    /** @return array<string, list<array{account_id: int, model: string|null}>> */
+    private function purposeAccounts(): array
+    {
+        return array_intersect_key($this->assistant->purposeChoices(), AiAccount::PURPOSES);
+    }
+
+    /**
      * * The enabled accounts that answer chat, in the order they are tried. Only display fields: never the token or the last error.
      *
-     * @return list<array{id: int, name: string, vendor_key: string, vendor: string, model: string|null, models: list<array{id: string, label: string}>, max_output_tokens: int|null, status: string}>
+     * @param  Collection<int, AiAccount>  $accounts
+     * @return array<int, array{id: int, name: string, vendor_key: string, vendor: string, model: string|null, models: array<int, array{id: string, label: string}>, max_output_tokens: int|null, status: string}>
      */
-    private function accountsPayload(): array
+    private function accountsPayload(Collection $accounts): array
     {
-        return AiAccount::query()->where('enabled', true)->orderBy('priority')->orderBy('id')->get()
+        return $accounts->where('enabled', true)
             ->filter(fn (AiAccount $account): bool => $account->allowsPurpose(AiAccount::PURPOSE_ASK))
             ->map(fn (AiAccount $account): array => [
                 'id' => $account->id,

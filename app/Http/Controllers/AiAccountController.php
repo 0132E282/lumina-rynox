@@ -8,6 +8,7 @@ use App\Models\AiAccount;
 use App\Models\Integration;
 use App\Services\Ai\AiAssistant;
 use App\Services\Ai\AiException;
+use App\Services\Ai\CliLlmClient;
 use App\Services\Ai\CliLogin;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -93,19 +94,61 @@ class AiAccountController extends Controller
         return $this->back('Kết nối thành công.');
     }
 
-    /** * The conversation that receives the daily report; blank turns the report off. */
+    /**
+     * Settings stored on the `ai` integration: the conversation that receives the daily report (blank turns the report off) and which account answers each purpose first.
+     * Only the keys present in the request change, so saving one never wipes the other.
+     */
     public function settings(Request $request): RedirectResponse
     {
-        $validated = $request->validate(['report_conversation_id' => ['nullable', 'uuid', 'exists:conversations,id']]);
+        // * Every purpose arrives as an ordered list of {account_id, model}; "automatic" (null or empty) is dropped, and the older single-value shapes read as a one-entry list.
+        if (is_array($request->input('purpose_accounts'))) {
+            $request->merge(['purpose_accounts' => array_filter(
+                array_map(fn (mixed $value): array => AiAssistant::choiceList($value), $request->input('purpose_accounts')),
+                fn (array $list): bool => $list !== [],
+            )]);
+        }
+
+        $validated = $request->validate([
+            'report_conversation_id' => ['nullable', 'uuid', 'exists:conversations,id'],
+            'purpose_accounts' => ['nullable', 'array'],
+            'purpose_accounts.*' => ['array', 'max:'.AiAssistant::MAX_PURPOSE_CHOICES],
+            // * Only an account that is connected can be chosen; the model follows the same safe-code rule as the CLI client.
+            'purpose_accounts.*.*.account_id' => ['required', 'integer', Rule::exists('ai_accounts', 'id')->where('status', 'connected')],
+            'purpose_accounts.*.*.model' => ['nullable', 'string', 'max:100', 'regex:'.CliLlmClient::MODEL_PATTERN],
+        ]);
+
+        $purposeAccounts = [];
+
+        foreach ($validated['purpose_accounts'] ?? [] as $purpose => $list) {
+            if (! array_key_exists($purpose, AiAccount::PURPOSES)) {
+                throw ValidationException::withMessages(['purpose_accounts' => 'Mục đích không hợp lệ.']);
+            }
+
+            $entries = array_map(fn (array $entry): array => ['account_id' => (int) $entry['account_id'], 'model' => filled($entry['model'] ?? null) ? (string) $entry['model'] : null], array_values($list));
+
+            if (count(array_unique(array_map(fn (array $entry): string => $entry['account_id'].'|'.$entry['model'], $entries))) !== count($entries)) {
+                throw ValidationException::withMessages(["purpose_accounts.{$purpose}" => 'Không chọn trùng một AI và model trong cùng mục đích.']);
+            }
+
+            $purposeAccounts[$purpose] = $entries;
+        }
 
         $integration = Integration::query()->firstOrNew(['provider' => AiAssistant::PROVIDER]);
         $settings = $integration->settings ?? [];
-        $settings['fields']['report_conversation_id'] = isset($validated['report_conversation_id']) ? (string) $validated['report_conversation_id'] : null;
+
+        if ($request->has('report_conversation_id')) {
+            $settings['fields']['report_conversation_id'] = isset($validated['report_conversation_id']) ? (string) $validated['report_conversation_id'] : null;
+        }
+
+        if ($request->has('purpose_accounts')) {
+            $settings['fields'][AiAssistant::SETTING_PURPOSE_ACCOUNTS] = $purposeAccounts;
+        }
+
         $integration->settings = $settings;
         $integration->status ??= Integration::STATUS_CONNECTED;
         $integration->save();
 
-        return $this->back('Đã lưu cấu hình báo cáo.');
+        return $this->back('Đã lưu cấu hình AI.');
     }
 
     /** @return array<string, mixed> */

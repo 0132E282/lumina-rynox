@@ -35,4 +35,18 @@ final class AiException extends RuntimeException
     public const CLI_UNSUPPORTED = 'Nhà cung cấp này không có CLI, hãy chọn cách gọi API key.';
 
     public const NO_MESSAGES = 'Hội thoại chưa có tin nhắn để gợi ý.';
+
+    /** A short class of the failure for the usage log: derived from the fixed text, so nothing of the vendor's own error is kept. */
+    public function kind(): string
+    {
+        return match ($this->getMessage()) {
+            self::QUOTA => 'quota',
+            self::UNAUTHORIZED, self::NO_KEY => 'unauthorized',
+            self::TIMEOUT => 'timeout',
+            self::EMPTY => 'empty',
+            self::FAILED => 'failed',
+            self::CLI_UNAVAILABLE, self::CLI_NOT_LOGGED_IN, self::CLI_NOT_FOUND, self::CLI_UNSUPPORTED => 'cli',
+            default => 'other',
+        };
+    }
 }

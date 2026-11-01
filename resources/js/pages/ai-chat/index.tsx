@@ -14,10 +14,15 @@ import {
 } from '@/actions/App/Http/Controllers/AiChatController';
 import { ActivityTerminal } from '@/components/ai-chat/activity-terminal';
 import type { ActivityEntry } from '@/components/ai-chat/activity-terminal';
+import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
+import { AiUsageDialog } from '@/components/ai-chat/ai-usage-dialog';
+import { ChatSettingsDialog } from '@/components/ai-chat/chat-settings-dialog';
 import { ChatComposer } from '@/components/ai-chat/chat-composer';
 import { CodeViewer } from '@/components/ai-chat/code-viewer';
 import { ChatThread } from '@/components/ai-chat/chat-thread';
 import type { ThreadItem } from '@/components/ai-chat/chat-thread';
+import { FileViewer } from '@/components/ai-chat/file-viewer';
+import { SidePanel } from '@/components/ai-chat/side-panel';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { SessionPanel } from '@/components/ai-chat/session-panel';
 import { LocalSourceMenu } from '@/components/ai-chat/local-source-menu';
@@ -31,10 +36,13 @@ import {
     SheetTitle,
     SheetTrigger,
 } from '@/components/ui/sheet';
+import { FileViewerContext } from '@/contexts/file-viewer-context';
+import type { ViewerFile } from '@/lib/viewer-file';
 import { useResizableWidth } from '@/hooks/use-resizable-width';
 import { aiErrorMessage } from '@/lib/ai-error';
 import { api } from '@/lib/api';
 import { readAiChatCache, writeAiChatCache } from '@/lib/ai-chat-cache';
+import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
 import { cn } from '@/lib/utils';
 import { home } from '@/routes';
 import type {
@@ -46,6 +54,7 @@ import type {
     AiChatPageProps,
     AiChatProposal,
     AiChatSelection,
+    AiChatSettings,
     AiChatSendResponse,
 } from '@/types';
 
@@ -61,9 +70,50 @@ const MODE_KEY = 'ai-chat:mode';
 // * Newest messages of an opened conversation kept in sessionStorage so reopening it shows them at once.
 const CACHED_MESSAGES = 50;
 
-type SessionState = { items: ThreadItem[]; accountId: number | null };
+/** * Name and avatar of the assistant: the person's choices, else the AI account's vendor. */
+function assistantIdentity(
+    settings: AiChatSettings,
+    account: AiChatAccount | undefined,
+): AssistantIdentity {
+    return {
+        imageUrl: settings.avatar_url,
+        icon: settings.assistant_icon,
+        color: settings.assistant_color,
+        name: settings.assistant_name,
+        vendor: account
+            ? { key: account.vendor_key, name: account.vendor }
+            : undefined,
+    };
+}
+
+/** * Light placeholder while a conversation with no remembered messages loads, so the main area is never blank. */
+function ThreadSkeleton() {
+    return (
+        <div
+            role="status"
+            aria-label="Đang tải cuộc trò chuyện"
+            className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden px-4 pt-16"
+        >
+            <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+                {[60, 85, 45].map((width, index) => (
+                    <div
+                        key={index}
+                        className={cn(
+                            'h-12 rounded-2xl bg-muted motion-safe:animate-pulse',
+                            index % 2 === 0 && 'self-end',
+                        )}
+                        style={{ width: `${width}%` }}
+                    />
+                ))}
+            </div>
+        </div>
+    );
+}
+
+type SessionState = { items: ThreadItem[] };
 
 const INFO_OPEN_KEY = 'ai-chat.info-open';
+const RECENTS_TAB_KEY = 'ai-chat.recents-tab';
 
 type AiChatMention = { path: string; n: number; review?: boolean };
 
@@ -119,6 +169,11 @@ function ChatPanel({
     onLog,
     onChanges,
     onSession,
+    selection,
+    onSelectionChange,
+    mode,
+    onModeChange,
+    settings,
 }: {
     conversation: AiChatConversation | null;
     initialMessages: AiChatMessage[];
@@ -134,30 +189,20 @@ function ChatPanel({
     onChanges: (proposals: AiChatProposal[]) => void;
     /** * The live thread and the picked AI account, for the read-only session panel. */
     onSession: (session: SessionState) => void;
+    /** * AI account/model and answer mode, owned by the page so the chat-settings dialog shares them with this composer. */
+    selection: AiChatSelection;
+    onSelectionChange: (selection: AiChatSelection) => void;
+    mode: AiChatMode;
+    onModeChange: (mode: AiChatMode) => void;
+    /** * The person's chat customisation (assistant name and avatar). */
+    settings: AiChatSettings;
 }) {
-    // * The first connected account is the one tried first; the person can pick another per message.
-    const [selection, setSelection] = useState<AiChatSelection>(() => {
-        const first =
-            aiAccounts.find((account) => account.status === 'connected') ??
-            aiAccounts[0];
-
-        return { accountId: first?.id ?? null, model: first?.model ?? null };
-    });
+    const authUser = usePage<{ auth: Auth }>().props.auth.user;
     const [items, setItems] = useState<ThreadItem[]>(initialMessages);
     const [draft, setDraft] = useState('');
     const [sending, setSending] = useState(false);
     const [files, setFiles] = useState<File[]>([]);
     const [optimizing, setOptimizing] = useState(false);
-    // * Answer mode: "auto" is the normal reply, "plan" asks for a plan only. Kept until changed (this tab only).
-    const [mode, setMode] = useState<AiChatMode>(() => {
-        try {
-            return sessionStorage.getItem(MODE_KEY) === 'plan'
-                ? 'plan'
-                : 'auto';
-        } catch {
-            return 'auto';
-        }
-    });
     // * "Tự tạo Pull Request" (default on): AI edits go straight to a new branch + PR; the base branch is never written.
     const [autoPr, setAutoPr] = useState(() => {
         try {
@@ -190,13 +235,18 @@ function ChatPanel({
     }, [items, onChanges]);
 
     useEffect(() => {
-        onSession({ items, accountId: selection.accountId });
-    }, [items, selection.accountId, onSession]);
+        onSession({ items });
+    }, [items, onSession]);
 
     const conversationId = useRef<string | null>(conversation?.id ?? null);
     const nextLocalId = useRef(0);
 
     /** `chosen`: text of a picked ```choices option, sent as-is; the draft and attachments stay untouched. */
+    const answering = aiAccounts.find(
+        (account) => account.id === selection.accountId,
+    );
+    const assistant = assistantIdentity(settings, answering);
+
     const submit = async (chosen?: string) => {
         const text = (chosen ?? draft).trim();
 
@@ -392,7 +442,7 @@ function ChatPanel({
                 autoFocus
                 accounts={aiAccounts}
                 selection={selection}
-                onSelectionChange={setSelection}
+                onSelectionChange={onSelectionChange}
                 files={files}
                 onFilesChange={setFiles}
                 acceptedExtensions={ATTACHMENT_EXTENSIONS}
@@ -401,15 +451,7 @@ function ChatPanel({
                 onRepoChange={onRepoChange}
                 githubConnected={githubConnected}
                 mode={mode}
-                onModeChange={(value) => {
-                    setMode(value);
-
-                    try {
-                        sessionStorage.setItem(MODE_KEY, value);
-                    } catch {
-                        // * Storage can be blocked; the mode still applies for this visit.
-                    }
-                }}
+                onModeChange={onModeChange}
                 autoPr={autoPr}
                 onAutoPrChange={(value) => {
                     setAutoPr(value);
@@ -457,6 +499,9 @@ function ChatPanel({
                 <ChatThread
                     items={items}
                     pending={sending}
+                    userName={authUser.name}
+                    userAvatar={authUser.avatar}
+                    assistant={assistant}
                     onChoose={(text) => void submit(text)}
                     onProposalsChange={(id, proposals) =>
                         setItems((current) =>
@@ -482,12 +527,63 @@ export default function AiChatIndex({
     githubConnected,
     chatContext,
     integrations,
+    settings: savedSettings,
+    aiAccountList,
 }: AiChatPageProps) {
-    const userId = usePage<{ auth: Auth }>().props.auth.user.id;
+    const authUser = usePage<{ auth: Auth }>().props.auth.user;
+    const userId = authUser.id;
     const [session, setSession] = useState<SessionState>({
         items: messages,
-        accountId: null,
     });
+    // * Account/model and answer mode live here so the composer and the chat-settings dialog share one state.
+    const [selection, setSelection] = useState<AiChatSelection>(() => {
+        // * The account chosen for the chat purpose (Cài đặt chat) first, else the first connected one.
+        const first =
+            aiAccounts.find(
+                (account) =>
+                    account.id ===
+                    aiAccountList.purpose_accounts.ask?.[0]?.account_id,
+            ) ??
+            aiAccounts.find((account) => account.status === 'connected') ??
+            aiAccounts[0];
+
+        return { accountId: first?.id ?? null, model: first?.model ?? null };
+    });
+    // * An account switched off in the dialog can no longer answer: fall back to the first one that still can.
+    useEffect(() => {
+        if (
+            selection.accountId !== null &&
+            !aiAccounts.some((account) => account.id === selection.accountId)
+        ) {
+            const next = aiAccounts[0];
+
+            setSelection({
+                accountId: next?.id ?? null,
+                model: next?.model ?? null,
+            });
+        }
+    }, [aiAccounts, selection.accountId]);
+    const [mode, setMode] = useState<AiChatMode>(() => {
+        try {
+            return sessionStorage.getItem(MODE_KEY) === 'plan'
+                ? 'plan'
+                : 'auto';
+        } catch {
+            return 'auto';
+        }
+    });
+    const changeMode = (value: AiChatMode) => {
+        setMode(value);
+
+        try {
+            sessionStorage.setItem(MODE_KEY, value);
+        } catch {
+            // * Storage can be blocked; the mode still applies for this visit.
+        }
+    };
+    const [settings, setSettings] = useState<AiChatSettings>(savedSettings);
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    const [statsOpen, setStatsOpen] = useState(false);
     const [infoOpen, setInfoOpen] = useState(() => {
         try {
             return sessionStorage.getItem(INFO_OPEN_KEY) === '1';
@@ -499,6 +595,68 @@ export default function AiChatIndex({
         () => window.matchMedia('(min-width: 1024px)').matches,
     );
     const infoWidth = useResizableWidth('ai-chat.width.info', 288, 220, 480);
+    // * Viewer width: about 45% of the screen by default, 360px at least and 70% at most (the saved width wins).
+    const viewerBounds = useMemo(() => {
+        const max = Math.max(480, Math.round(window.innerWidth * 0.7));
+
+        return {
+            max,
+            initial: Math.min(
+                max,
+                Math.max(360, Math.round(window.innerWidth * 0.45)),
+            ),
+        };
+    }, []);
+    const viewerWidth = useResizableWidth(
+        'ai-chat.width.viewer',
+        viewerBounds.initial,
+        360,
+        viewerBounds.max,
+    );
+    // * The file open in the right-hand viewer (memory only); it takes the info panel's slot while open.
+    const [viewerFile, setViewerFile] = useState<ViewerFile | null>(null);
+    const [viewerClosing, setViewerClosing] = useState(false);
+    const [viewerExpanded, setViewerExpanded] = useState(false);
+    const [viewerDragging, setViewerDragging] = useState(false);
+    const [infoDragging, setInfoDragging] = useState(false);
+    const viewerPanel = useRef<HTMLElement>(null);
+    const viewerOpener = useRef<HTMLElement | null>(null);
+    const closeTimer = useRef<number | undefined>(undefined);
+    const openViewer = useCallback((file: ViewerFile) => {
+        window.clearTimeout(closeTimer.current);
+        viewerOpener.current ??=
+            document.activeElement instanceof HTMLElement
+                ? document.activeElement
+                : null;
+        setViewerClosing(false);
+        setViewerFile(file);
+    }, []);
+    // * Slides out for 200ms, then unmounts; with reduced motion it closes at once. Focus goes back to what opened it.
+    const closeViewer = useCallback(() => {
+        const finish = () => {
+            setViewerFile(null);
+            setViewerClosing(false);
+            viewerOpener.current?.focus();
+            viewerOpener.current = null;
+        };
+
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            finish();
+
+            return;
+        }
+
+        setViewerClosing(true);
+        closeTimer.current = window.setTimeout(finish, 200);
+    }, []);
+    const viewerApi = useMemo(() => ({ open: openViewer }), [openViewer]);
+
+    useEffect(() => () => window.clearTimeout(closeTimer.current), []);
+    useEffect(() => {
+        if (viewerFile && !viewerClosing) {
+            viewerPanel.current?.focus();
+        }
+    }, [viewerFile, viewerClosing]);
 
     useEffect(() => {
         const query = window.matchMedia('(min-width: 1024px)');
@@ -522,13 +680,32 @@ export default function AiChatIndex({
     const [recentsOpen, setRecentsOpen] = useState(false);
     const [recentsCollapsed, setRecentsCollapsed] = useState(false);
     const activeId = activeConversation?.id ?? null;
-    // * The repo and its code viewer belong to the page, so the "Code" tab and the chat share them across conversations.
-    const [repo, setRepo] = useState<string | null>(null);
+    // * The Terminal belongs to the "Code" tab: other tabs only hide it (its open state and log are kept).
+    // * The tab is kept for the visit (sessionStorage): opening a chat remounts the page and must not switch the sidebar to the other tab.
+    const [recentsTab, setRecentsTabState] = useState<RecentsTab>(() => {
+        try {
+            return sessionStorage.getItem(RECENTS_TAB_KEY) === 'projects'
+                ? 'projects'
+                : 'chat';
+        } catch {
+            return 'chat';
+        }
+    });
+    const setRecentsTab = useCallback((tab: RecentsTab) => {
+        setRecentsTabState(tab);
+
+        try {
+            sessionStorage.setItem(RECENTS_TAB_KEY, tab);
+        } catch {
+            // * Storage blocked: the tab still applies for this page.
+        }
+    }, []);
+    // * The repo and its code viewer belong to the page. Only the Code tab has a repo: in the Chat tab no repo is sent, even if one was picked earlier.
+    const [selectedRepo, setRepo] = useState<string | null>(null);
+    const repo = recentsTab === 'projects' ? selectedRepo : null;
     const [codeOpen, setCodeOpen] = useState(false);
     const [changes, setChanges] = useState<AiChatProposal[]>([]);
     const [terminalOpen, setTerminalOpen] = useState(false);
-    // * The Terminal belongs to the "Code" tab: other tabs only hide it (its open state and log are kept).
-    const [recentsTab, setRecentsTab] = useState<RecentsTab>('chat');
     const terminalVisible = recentsTab === 'projects';
     const [log, setLog] = useState<ActivityEntry[]>([]);
     const nextLogId = useRef(0);
@@ -593,21 +770,43 @@ export default function AiChatIndex({
     useEffect(() => {
         if (activeRepo !== null) {
             setRepo(activeRepo);
+            setRecentsTab('projects');
         }
-    }, [activeRepo, activeId]);
+    }, [activeRepo, activeId, setRecentsTab]);
 
-    const selectRepo = (name: string) => {
-        setRepo(name);
-        setCodeOpen(true);
-        addLog('info', `Chọn repo ${name}`);
+    const selectRepo = useCallback(
+        (name: string) => {
+            setRepo(name);
+            setRecentsTab('projects');
+            setCodeOpen(true);
+            addLog('info', `Chọn repo ${name}`);
 
-        // * Picking a project starts a fresh chat for it.
-        if (activeId !== null) {
-            router.get(home.url());
-        }
-    };
+            // * Picking a project starts a fresh chat for it. preserveState keeps this page mounted: Inertia remounts a page on a plain GET visit, which reset the sidebar to the Chat tab and dropped the repo.
+            if (activeId !== null) {
+                router.get(home.url(), {}, { ...OPEN_CONVERSATION_VISIT });
+            }
+        },
+        [activeId, addLog, setRecentsTab],
+    );
+    // * Stable callbacks and props: the memoised sidebar re-renders only when its own data changes, not on every thread or panel update.
+    const collapseRecents = useCallback(() => setRecentsCollapsed(true), []);
+    const closeRecentsSheet = useCallback(() => setRecentsOpen(false), []);
+    const openSettings = useCallback(() => setSettingsOpen(true), []);
+    const openStats = useCallback(() => setStatsOpen(true), []);
+    const openSettingsFromSheet = useCallback(() => {
+        setRecentsOpen(false);
+        setSettingsOpen(true);
+    }, []);
+    const openStatsFromSheet = useCallback(() => {
+        setRecentsOpen(false);
+        setStatsOpen(true);
+    }, []);
     const pickedAccount = aiAccounts.find(
-        (account) => account.id === session.accountId,
+        (account) => account.id === selection.accountId,
+    );
+    const sidebarAssistant = useMemo(
+        () => assistantIdentity(settings, pickedAccount),
+        [settings, pickedAccount],
     );
     const infoPanel = (
         <SessionPanel
@@ -623,8 +822,32 @@ export default function AiChatIndex({
         />
     );
     return (
-        <>
+        <FileViewerContext.Provider value={viewerApi}>
             <Head title="Trợ lý AI" />
+            <AiUsageDialog
+                open={statsOpen}
+                onOpenChange={setStatsOpen}
+                selection={selection}
+            />
+            <ChatSettingsDialog
+                open={settingsOpen}
+                onOpenChange={setSettingsOpen}
+                settings={settings}
+                onSaved={setSettings}
+                accountList={aiAccountList}
+                accountName={authUser.name}
+                aiAccounts={aiAccounts}
+                selection={selection}
+                onSelectionChange={setSelection}
+                vendor={
+                    pickedAccount
+                        ? {
+                              key: pickedAccount.vendor_key,
+                              name: pickedAccount.vendor,
+                          }
+                        : undefined
+                }
+            />
             <div className="flex min-h-0 flex-1">
                 {/* * The width animates to 0 when collapsed; the content keeps its own width so it clips instead of reflowing. */}
                 <aside
@@ -639,12 +862,16 @@ export default function AiChatIndex({
                         <RecentsList
                             conversations={conversations}
                             aiAccounts={aiAccounts}
+                            assistant={sidebarAssistant}
+                            account={pickedAccount}
                             activeId={activeId}
-                            onCollapse={() => setRecentsCollapsed(true)}
+                            onCollapse={collapseRecents}
                             repo={repo}
                             onSelectRepo={selectRepo}
                             githubConnected={githubConnected}
                             tab={recentsTab}
+                            onOpenSettings={openSettings}
+                            onOpenStats={openStats}
                             onTabChange={setRecentsTab}
                         />
                     </div>
@@ -695,12 +922,16 @@ export default function AiChatIndex({
                                 <RecentsList
                                     conversations={conversations}
                                     aiAccounts={aiAccounts}
+                                    assistant={sidebarAssistant}
+                                    account={pickedAccount}
                                     activeId={activeId}
-                                    onNavigate={() => setRecentsOpen(false)}
+                                    onNavigate={closeRecentsSheet}
                                     repo={repo}
                                     onSelectRepo={selectRepo}
                                     githubConnected={githubConnected}
                                     tab={recentsTab}
+                                    onOpenSettings={openSettingsFromSheet}
+                                    onOpenStats={openStatsFromSheet}
                                     onTabChange={setRecentsTab}
                                 />
                             </SheetContent>
@@ -787,13 +1018,23 @@ export default function AiChatIndex({
                             )}
                         </div>
                     </div>
-                    {cachedOpening !== null ? (
+                    {cachedOpening === null &&
+                    opening !== null &&
+                    opening !== activeId ? (
+                        <ThreadSkeleton />
+                    ) : cachedOpening !== null ? (
                         <ChatThread
                             items={cachedOpening.map((message) => ({
                                 ...message,
                                 proposals: undefined,
                             }))}
                             pending={false}
+                            userName={authUser.name}
+                            userAvatar={authUser.avatar}
+                            assistant={assistantIdentity(
+                                settings,
+                                pickedAccount,
+                            )}
                             onProposalsChange={() => undefined}
                         />
                     ) : (
@@ -815,6 +1056,11 @@ export default function AiChatIndex({
                             onLog={addLog}
                             onChanges={setChanges}
                             onSession={setSession}
+                            selection={selection}
+                            onSelectionChange={setSelection}
+                            mode={mode}
+                            onModeChange={changeMode}
+                            settings={settings}
                         />
                     )}
                     {terminalOpen && terminalVisible && (
@@ -825,20 +1071,104 @@ export default function AiChatIndex({
                         />
                     )}
                 </section>
-                {infoOpen && wide && (
-                    <aside
-                        aria-label="Thông tin phiên chat"
-                        style={{ width: infoWidth.width }}
-                        className="relative flex min-h-0 max-w-[40%] shrink-0 flex-col border-l"
+                {viewerFile && wide && (
+                    <SidePanel
+                        open={!viewerClosing}
+                        width={
+                            viewerExpanded
+                                ? viewerBounds.max
+                                : viewerWidth.width
+                        }
+                        dragging={viewerDragging}
+                        label="Xem tệp"
+                        maxWidthClass="max-w-[70%]"
+                        panelRef={viewerPanel}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Escape') {
+                                event.stopPropagation();
+                                closeViewer();
+                            }
+                        }}
+                    >
+                        {!viewerExpanded && (
+                            <ResizeHandle
+                                label="Đổi độ rộng bảng xem tệp"
+                                className="translate-x-0"
+                                {...viewerWidth.handleProps}
+                                onPointerDown={(event) => {
+                                    setViewerDragging(true);
+                                    viewerWidth.handleProps.onPointerDown(
+                                        event,
+                                    );
+                                }}
+                                onPointerUp={() => {
+                                    setViewerDragging(false);
+                                    viewerWidth.handleProps.onPointerUp();
+                                }}
+                                onPointerCancel={() => {
+                                    setViewerDragging(false);
+                                    viewerWidth.handleProps.onPointerCancel();
+                                }}
+                            />
+                        )}
+                        <FileViewer
+                            file={viewerFile}
+                            onClose={closeViewer}
+                            expanded={viewerExpanded}
+                            onToggleExpand={() =>
+                                setViewerExpanded((value) => !value)
+                            }
+                        />
+                    </SidePanel>
+                )}
+                {viewerFile && !wide && (
+                    <Sheet open onOpenChange={() => setViewerFile(null)}>
+                        <SheetContent
+                            side="right"
+                            className="w-full p-0 sm:max-w-md"
+                        >
+                            <SheetTitle className="sr-only">Xem tệp</SheetTitle>
+                            <SheetDescription className="sr-only">
+                                Xem trước và mã của tệp trong cuộc trò chuyện.
+                            </SheetDescription>
+                            <FileViewer
+                                file={viewerFile}
+                                onClose={() => setViewerFile(null)}
+                                expanded={false}
+                                onToggleExpand={() => undefined}
+                            />
+                        </SheetContent>
+                    </Sheet>
+                )}
+                {wide && (
+                    <SidePanel
+                        open={infoOpen && !viewerFile}
+                        width={infoWidth.width}
+                        dragging={infoDragging}
+                        label="Thông tin phiên chat"
+                        maxWidthClass="max-w-[40%]"
                     >
                         <ResizeHandle
                             label="Đổi độ rộng bảng thông tin"
+                            className="translate-x-0"
                             {...infoWidth.handleProps}
+                            onPointerDown={(event) => {
+                                setInfoDragging(true);
+                                infoWidth.handleProps.onPointerDown(event);
+                            }}
+                            onPointerUp={() => {
+                                setInfoDragging(false);
+                                infoWidth.handleProps.onPointerUp();
+                            }}
+                            onPointerCancel={() => {
+                                setInfoDragging(false);
+                                infoWidth.handleProps.onPointerCancel();
+                            }}
                         />
                         {infoPanel}
-                    </aside>
+                    </SidePanel>
                 )}
-                {!wide && (
+                {!wide && !viewerFile && (
                     <Sheet open={infoOpen} onOpenChange={toggleInfo}>
                         <SheetContent side="right" className="w-80 p-0">
                             <SheetTitle className="sr-only">
@@ -873,6 +1203,6 @@ export default function AiChatIndex({
                     />
                 )}
             </div>
-        </>
+        </FileViewerContext.Provider>
     );
 }

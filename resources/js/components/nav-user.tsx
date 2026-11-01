@@ -1,7 +1,7 @@
 import { Link } from '@inertiajs/react';
 import {
     IconCreditCard,
-    IconDotsVertical,
+    IconDots,
     IconLogout,
     IconUserCircle,
 } from '@tabler/icons-react';
@@ -62,7 +62,7 @@ export function NavUser({
                                     {user.email}
                                 </span>
                             </div>
-                            <IconDotsVertical className="ml-auto size-4" />
+                            <IconDots className="ml-auto size-4" />
                         </SidebarMenuButton>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent

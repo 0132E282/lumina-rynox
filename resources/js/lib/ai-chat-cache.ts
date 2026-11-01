@@ -33,8 +33,39 @@ export function writeAiChatCache(
     }
 }
 
+const requests = new Map<string, { at: number; promise: Promise<unknown> }>();
+
+/**
+ * Runs `fetcher` at most once per `ttlMs` for the same key and shares one in-flight request, so reopening the Code tab, a repo or the repo picker does not spend the server's per-minute budget.
+ * Memory only (gone on reload, cleared at logout); a failed request is not kept, so the next call retries.
+ */
+export function cachedRequest<T>(
+    key: string,
+    ttlMs: number,
+    fetcher: () => Promise<T>,
+): Promise<T> {
+    const hit = requests.get(key);
+
+    if (hit && Date.now() - hit.at < ttlMs) {
+        return hit.promise as Promise<T>;
+    }
+
+    const promise = fetcher();
+
+    requests.set(key, { at: Date.now(), promise });
+    promise.catch(() => {
+        if (requests.get(key)?.promise === promise) {
+            requests.delete(key);
+        }
+    });
+
+    return promise;
+}
+
 /** * Removes every cached AI chat entry (called at logout). */
 export function clearAiChatCache(): void {
+    requests.clear();
+
     try {
         Object.keys(sessionStorage)
             .filter((key) => key.startsWith(PREFIX))

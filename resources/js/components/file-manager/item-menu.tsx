@@ -1,4 +1,4 @@
-import { Info, MoreVertical } from 'lucide-react';
+import { Info, MoreHorizontal } from 'lucide-react';
 import { Fragment } from 'react';
 import type { ReactNode } from 'react';
 import { RowActionsMenu } from '@/components/tables/row-actions-menu';
@@ -33,7 +33,7 @@ export function ItemMenu({
                     onClick={(e) => e.stopPropagation()}
                     className="rounded-full p-1 text-muted-foreground hover:text-foreground"
                 >
-                    <MoreVertical className="size-3.5" />
+                    <MoreHorizontal className="size-3.5" />
                 </button>
             }
             items={actions.map((action) => ({

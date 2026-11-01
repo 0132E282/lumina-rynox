@@ -20,7 +20,7 @@ final class CliLlmClient implements LlmClient
     private const TIMEOUT_SECONDS = 120;
 
     // * Only plain model ids may reach argv (no leading dash, so a model can never be read as an option).
-    private const MODEL_PATTERN = '/^[A-Za-z0-9][A-Za-z0-9._:-]*$/';
+    public const MODEL_PATTERN = '/^[A-Za-z0-9][A-Za-z0-9._:-]*$/';
 
     // * Vendor => environment variable the CLI reads its session from. Unverified against the real CLIs; a CLI that ignores it falls back to the machine's own login.
     private const TOKEN_ENV = [
@@ -55,6 +55,7 @@ final class CliLlmClient implements LlmClient
 
             throw new AiException(match (true) {
                 $this->notLoggedIn($output) => AiException::CLI_NOT_LOGGED_IN,
+                $this->quotaHit($output) => AiException::QUOTA,
                 $result->exitCode() === 127 => AiException::CLI_NOT_FOUND,
                 default => AiException::CLI_UNAVAILABLE,
             });
@@ -67,6 +68,12 @@ final class CliLlmClient implements LlmClient
         }
 
         return $text;
+    }
+
+    /** Only the CLI's own plain messages about a limit: `usage limit reached`, `rate limit`, `insufficient_quota`, `credit balance is too low`. */
+    private function quotaHit(string $output): bool
+    {
+        return preg_match('~usage limit reached|rate[ _-]?limit|insufficient_quota|credit balance (is )?too low~i', $output) === 1;
     }
 
     private function notLoggedIn(string $output): bool

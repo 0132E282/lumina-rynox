@@ -74,8 +74,58 @@ export type AiChatPageProps = {
     githubConnected: boolean;
     /** * Inputs of the session panel's token estimate (the prompt text itself stays on the server). */
     chatContext: AiChatContext;
+    /** * The signed-in person's own chat customisation. */
+    settings: AiChatSettings;
+    /** * Safe account fields for the chat-settings dialog (never tokens). */
+    aiAccountList: AiChatAccountList;
     /** * Integrations for the session panel; null without the `integrations.view` permission. */
     integrations: AiChatIntegration[] | null;
+};
+
+export type AiChatSettings = {
+    custom_instructions: string | null;
+    /** * How the AI addresses the person (null = the account name). */
+    display_name: string | null;
+    assistant_name: string | null;
+    assistant_icon: string | null;
+    assistant_color: string | null;
+    /** * Route that serves the uploaded assistant avatar (with a cache-busting version), or null. Never a disk path. */
+    avatar_url: string | null;
+};
+
+export type AiChatAccountRow = {
+    id: number;
+    name: string;
+    vendor_key: string;
+    vendor: string;
+    /** * `connected|error|disconnected`. */
+    status: string;
+    enabled: boolean;
+    /** * Lower runs first. */
+    priority: number;
+    /** * Purposes this account may serve; null = every purpose. */
+    purposes: string[] | null;
+    /** * The account's own model (null = the vendor default). */
+    model: string | null;
+    /** * Models offered for this account (the same list the composer uses). */
+    models: { id: string; label: string }[];
+};
+
+/** * What answers a purpose: an account and, optionally, a model used for that purpose only (null = the account's own). */
+export type AiChatPurposeChoice = {
+    account_id: number;
+    model: string | null;
+};
+
+export type AiChatAccountList = {
+    accounts: AiChatAccountRow[];
+    purposes: { key: string; label: string }[];
+    /** * Purpose key => ordered accounts (with an optional model) that answer it: the first leads, the rest are fallbacks. Absent = automatic by priority. */
+    purpose_accounts: Record<string, AiChatPurposeChoice[]>;
+    /** * `integrations.view`: the "Thêm tài khoản" link. */
+    can_view: boolean;
+    /** * `integrations.update`: switches and saving the per-purpose choice. */
+    can_update: boolean;
 };
 
 export type AiChatContext = {
@@ -100,4 +150,37 @@ export type AiChatSendResponse = {
     user_message: AiChatMessage;
     assistant_message: AiChatMessage;
     auto_pr_error?: string | null;
+};
+
+/** * One account row of the "Thống kê AI" dialog (the call counts are the signed-in person's own). */
+export type AiUsageAccount = {
+    id: number;
+    name: string;
+    vendor_key: string;
+    vendor: string;
+    model: string | null;
+    enabled: boolean;
+    calls_24h: number;
+    calls_7d: number;
+    last_used_at: string | null;
+    /** * Estimated tokens (about 4 characters each) of this person's calls; not the vendor's own count. */
+    tokens_24h: number;
+    tokens_7d: number;
+    /** * The largest single request (estimated input tokens) in 7 days; null with no estimate yet. */
+    largest_request: number | null;
+    /** * The model's per-request context window, not a quota. */
+    context_window: number;
+    /** * Models this person used in 7 days, most used first. */
+    models_used: string[];
+    /** * `active|error|quota|unused|disabled`; `quota` only while the latest quota error is newer than the latest success. */
+    status: string;
+    status_at: string | null;
+};
+
+export type AiUsageStats = {
+    /** * false while the usage table does not exist yet. */
+    available: boolean;
+    accounts: AiUsageAccount[];
+    /** * Assistant replies already in the chat history (no account is stored there, so they are not split per account). */
+    history: { replies_24h: number; replies_7d: number };
 };
