@@ -29,6 +29,12 @@ export default function MonacoDiff({
             options={{
                 ...READ_ONLY_OPTIONS,
                 renderSideBySide: false,
+                // * Only the changed lines and 3 around them, with line numbers, like a pull request.
+                hideUnchangedRegions: {
+                    enabled: true,
+                    contextLineCount: 3,
+                    minimumLineCount: 3,
+                },
                 enableSplitViewResizing: false,
                 renderOverviewRuler: false,
                 originalEditable: false,

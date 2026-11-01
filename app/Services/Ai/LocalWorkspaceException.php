@@ -29,6 +29,8 @@ final class LocalWorkspaceException extends RuntimeException
 
     public const CONFLICT = 'Tệp đã thay đổi kể từ lúc đề xuất. Hãy yêu cầu AI đề xuất lại.';
 
+    public const REVERT_UNAVAILABLE = 'Không hoàn tác được: tệp mới tạo hoặc thay đổi quá lớn để dựng lại bản cũ.';
+
     public const WRITE_FAILED = 'Không ghi được tệp.';
 
     public const BAD_FOLDER = 'Thư mục không hợp lệ hoặc không tồn tại.';
@@ -36,6 +38,12 @@ final class LocalWorkspaceException extends RuntimeException
     public const FOLDER_LINK = 'Đường dẫn có liên kết tượng trưng; hãy dùng đường dẫn thật của thư mục.';
 
     public const FOLDER_NOT_ALLOWED = 'Thư mục này nằm ngoài vị trí cho phép hoặc là vị trí nhạy cảm.';
+
+    public const FOLDER_NOT_FOUND = 'Không tìm thấy thư mục “%s” trong khu vực được phép (%s, tối đa 7 cấp). Thư mục ở nơi khác thì thêm nơi đó vào AI_CHAT_LOCAL_IMPORT_BASES trong .env.';
+
+    public const FOLDER_UNREADABLE = 'Máy chủ không đọc được thư mục %s (macOS có thể đang chặn quyền). Vào System Settings → Privacy & Security → Files and Folders (hoặc Full Disk Access) và cho ứng dụng chạy máy chủ quyền truy cập.';
+
+    public const FOLDER_AMBIGUOUS = 'Có nhiều thư mục trùng tên và nội dung; hãy chọn thư mục cụ thể hơn.';
 
     public const FOLDER_DUPLICATE = 'Thư mục này đã được thêm.';
 

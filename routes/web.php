@@ -58,9 +58,11 @@ Route::middleware(['auth', 'web'])->group(function () {
     Route::get('ai-chat/local/status', [LocalWorkspaceController::class, 'status'])->middleware(AuthorizeResource::class.':ai,use')->name('ai-chat.local.status');
     Route::post('ai-chat/local/projects', [LocalWorkspaceController::class, 'storeProject'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:10,1,ai-local-import'])->name('ai-chat.local.projects.store');
     Route::delete('ai-chat/local/projects/{key}', [LocalWorkspaceController::class, 'destroyProject'])->where('key', '[a-z0-9_-]{1,40}')->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-import'])->name('ai-chat.local.projects.destroy');
+    Route::post('ai-chat/local/find-folder', [LocalWorkspaceController::class, 'findFolder'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-import'])->name('ai-chat.local.find-folder');
     Route::get('ai-chat/local/tree', [LocalWorkspaceController::class, 'tree'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:30,1,ai-local'])->name('ai-chat.local.tree');
     Route::get('ai-chat/local/file', [LocalWorkspaceController::class, 'file'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:60,1,ai-local'])->name('ai-chat.local.file');
     Route::post('ai-chat/messages/{message}/proposals/apply-local', [AiChatController::class, 'applyLocalProposals'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-write'])->name('ai-chat.proposals.apply-local');
+    Route::post('ai-chat/messages/{message}/proposals/revert-local', [AiChatController::class, 'revertLocalProposals'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-write'])->name('ai-chat.proposals.revert-local');
     // * Per-project skills, subagents and MCP servers (all off by default); creating a skill or subagent writes into a local project, so it needs `ai.local-write`.
     Route::get('ai-chat/tools', [AiProjectToolsController::class, 'index'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-tools'])->name('ai-chat.tools.index');
     Route::put('ai-chat/tools', [AiProjectToolsController::class, 'toggle'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:60,1,ai-tools'])->name('ai-chat.tools.toggle');

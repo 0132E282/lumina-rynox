@@ -139,7 +139,7 @@ final class ProjectTools
     /** @return array{files: array<string, string>, sources: array<string, list<string>>} */
     private function globalScan(string $kind): array
     {
-        $home = (string) (getenv('HOME') ?: '');
+        $home = CliRuntime::home();
         $files = [];
         $sources = [];
 

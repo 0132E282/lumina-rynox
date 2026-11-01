@@ -116,7 +116,12 @@ class ProjectToolsTest extends AiTestCase
         $user = $this->admin();
 
         $this->actingAs($user)->getJson(route('ai-chat.tools.index', ['project' => 'local:work']))->assertOk()->assertJsonPath('global_skills.0.name', 'global-one')->assertJsonPath('global_skills.0.description', 'Dùng chung');
-        $this->actingAs($user)->putJson(route('ai-chat.tools.toggle'), ['project' => 'global', 'kind' => 'agent', 'name' => 'global-one', 'on' => true])->assertUnprocessable();
+        // * Machine-wide subagents (`~/.agents/agents/*.md`) are listed and switched like skills; a bad name is still refused.
+        File::ensureDirectoryExists($this->base.'/home/.agents/agents');
+        file_put_contents($this->base.'/home/.agents/agents/global-helper.md', "---\nname: global-helper\ndescription: Trợ giúp chung\n---\nVai trò toàn cục.\n");
+        $this->actingAs($user)->getJson(route('ai-chat.tools.index', ['project' => 'local:work']))->assertOk()->assertJsonPath('global_agents.0.name', 'global-helper')->assertJsonPath('global_agents.0.description', 'Trợ giúp chung');
+        $this->actingAs($user)->putJson(route('ai-chat.tools.toggle'), ['project' => 'global', 'kind' => 'agent', 'name' => 'global-helper', 'on' => false])->assertOk();
+        $this->actingAs($user)->putJson(route('ai-chat.tools.toggle'), ['project' => 'global', 'kind' => 'agent', 'name' => '../x', 'on' => true])->assertUnprocessable();
         $this->actingAs($user)->putJson(route('ai-chat.tools.toggle'), ['project' => 'global', 'kind' => 'skill', 'name' => '../x', 'on' => true])->assertUnprocessable();
         $tools = app(ProjectTools::class);
         $context = $tools->forChat($user, [], true, 'dùng global-one');

@@ -29,7 +29,7 @@ final class CliRuntime
             return [$command, $env];
         }
 
-        $home = (string) (getenv('HOME') ?: '');
+        $home = self::home();
         $extra = array_filter([
             ...explode(':', (string) config('services.ai_cli.paths', '')),
             '/opt/homebrew/bin',
@@ -48,6 +48,20 @@ final class CliRuntime
         $env['PATH'] = implode(':', array_unique([dirname($found), ...$extra, (string) getenv('PATH')]));
 
         return [$command, $env];
+    }
+
+    /** * Home folder of the user running PHP: `HOME` when set, else from the system account (a dev server or FPM often starts without `HOME`). */
+    public static function home(): string
+    {
+        $home = (string) getenv('HOME');
+
+        if ($home !== '') {
+            return $home;
+        }
+
+        $user = function_exists('posix_getpwuid') ? posix_getpwuid(posix_geteuid()) : false;
+
+        return is_array($user) ? (string) $user['dir'] : '';
     }
 
     /** @return array<string, string> */

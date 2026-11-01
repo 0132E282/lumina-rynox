@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature\AiChat;
 
 use App\Models\Admin;
+use App\Models\AiChangeProposal;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
 use App\Services\Ai\AiAssistant;
@@ -78,6 +79,18 @@ class LocalWorkspaceTest extends AiTestCase
         $response = $this->actingAs($user)->postJson(route('ai-chat.send'), ['message' => 'sửa giúp', 'local_root' => 'work'])->assertOk();
 
         return [(int) $response->json('assistant_message.id'), (string) $response->json('assistant_message.proposals.0.path')];
+    }
+
+    public function test_a_chat_about_a_local_folder_belongs_to_that_project(): void
+    {
+        $user = $this->admin();
+        $this->fakeAnswer('Xong.');
+
+        $response = $this->actingAs($user)->postJson(route('ai-chat.send'), ['message' => 'xin chào', 'local_root' => 'work'])->assertOk();
+
+        // * Without this the chat had no project and was listed under "Chat", not under the folder.
+        $response->assertJsonPath('conversation.repo', 'local:work');
+        $this->assertSame('local:work', AiConversation::query()->firstOrFail()->repo);
     }
 
     public function test_it_is_off_by_default_and_says_how_to_turn_it_on(): void
@@ -203,17 +216,15 @@ class LocalWorkspaceTest extends AiTestCase
         $this->actingAs($user)->postJson(route('ai-chat.proposals.apply-local', $messageId))->assertForbidden();
     }
 
-    public function test_an_edit_is_only_proposed_and_written_after_apply(): void
+    public function test_an_edit_is_written_right_away_and_logged_without_its_content(): void
     {
         $user = $this->admin();
         [$messageId, $path] = $this->proposeEdit($user, 'src/app.txt', "one\nTWO\n");
 
         $this->assertSame('src/app.txt', $path);
-        $this->assertSame("one\ntwo\n", file_get_contents($this->root.'/src/app.txt'));
-
-        $this->actingAs($user)->postJson(route('ai-chat.proposals.apply-local', $messageId))->assertOk()->assertJsonPath('proposals.0.status', 'applied');
-
         $this->assertSame("one\nTWO\n", file_get_contents($this->root.'/src/app.txt'));
+        $this->assertSame('applied', AiChangeProposal::query()->where('ai_message_id', $messageId)->sole()->status);
+
         $log = Activity::query()->where('event', 'ai-chat.local-write')->sole();
         $this->assertSame('src/app.txt', $log->properties['path']);
         $this->assertStringNotContainsString('TWO', json_encode($log->properties, JSON_THROW_ON_ERROR));
@@ -221,25 +232,58 @@ class LocalWorkspaceTest extends AiTestCase
         $this->actingAs($user)->postJson(route('ai-chat.proposals.apply-local', $messageId))->assertStatus(422);
     }
 
-    public function test_a_new_file_can_be_created_after_apply(): void
+    public function test_a_new_file_is_created_right_away(): void
     {
         $user = $this->admin();
-        [$messageId] = $this->proposeEdit($user, 'src/new.txt', 'hello');
+        $this->proposeEdit($user, 'src/new.txt', 'hello');
 
-        $this->assertFileDoesNotExist($this->root.'/src/new.txt');
-        $this->actingAs($user)->postJson(route('ai-chat.proposals.apply-local', $messageId))->assertOk();
         $this->assertSame('hello', file_get_contents($this->root.'/src/new.txt'));
     }
 
-    public function test_a_changed_file_is_a_conflict_and_nothing_is_written(): void
+    public function test_a_pending_edit_for_a_file_changed_since_is_a_conflict_and_nothing_is_written(): void
     {
         $user = $this->admin();
         [$messageId] = $this->proposeEdit($user, 'src/app.txt', "one\nTWO\n");
+        $proposal = AiChangeProposal::query()->where('ai_message_id', $messageId)->sole();
+        $proposal->update(['status' => AiChangeProposal::STATUS_PENDING, 'base_sha' => LocalWorkspace::hash("one\ntwo\n")]);
         file_put_contents($this->root.'/src/app.txt', 'edited by hand');
 
         $this->actingAs($user)->postJson(route('ai-chat.proposals.apply-local', $messageId))->assertStatus(409);
 
         $this->assertSame('edited by hand', file_get_contents($this->root.'/src/app.txt'));
+    }
+
+    public function test_an_applied_edit_can_be_reverted_once(): void
+    {
+        $user = $this->admin();
+        [$messageId] = $this->proposeEdit($user, 'src/app.txt', "one\nTWO\n");
+
+        $this->actingAs($user)->postJson(route('ai-chat.proposals.revert-local', $messageId))->assertOk()->assertJsonPath('proposals.0.status', 'reverted');
+
+        $this->assertSame("one\ntwo\n", file_get_contents($this->root.'/src/app.txt'));
+        $this->assertSame(1, Activity::query()->where('event', 'ai-chat.local-revert')->count());
+        $this->actingAs($user)->postJson(route('ai-chat.proposals.revert-local', $messageId))->assertStatus(422);
+    }
+
+    public function test_a_revert_never_overwrites_a_file_edited_since(): void
+    {
+        $user = $this->admin();
+        [$messageId] = $this->proposeEdit($user, 'src/app.txt', "one\nTWO\n");
+        file_put_contents($this->root.'/src/app.txt', 'edited by hand');
+
+        $this->actingAs($user)->postJson(route('ai-chat.proposals.revert-local', $messageId))->assertStatus(409);
+
+        $this->assertSame('edited by hand', file_get_contents($this->root.'/src/app.txt'));
+    }
+
+    public function test_a_created_file_cannot_be_reverted(): void
+    {
+        $user = $this->admin();
+        [$messageId] = $this->proposeEdit($user, 'src/new.txt', 'hello');
+
+        $this->actingAs($user)->postJson(route('ai-chat.proposals.revert-local', $messageId))->assertStatus(422);
+
+        $this->assertSame('hello', file_get_contents($this->root.'/src/new.txt'));
     }
 
     public function test_edits_outside_the_root_or_on_denied_paths_are_never_proposed(): void

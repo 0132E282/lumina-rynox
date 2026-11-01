@@ -8,7 +8,7 @@ import {
     Eye,
     X,
 } from 'lucide-react';
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import {
     file as fileRoute,
     tree as treeRoute,
@@ -24,6 +24,7 @@ import { FileIcon } from '@/components/ai-chat/file-icon';
 import { MarkdownContent } from '@/components/ai-chat/markdown-content';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { cachedRequest } from '@/lib/ai-chat-cache';
+import { diffSides, reconstructOriginal } from '@/lib/proposal-original';
 import { requestErrorMessage } from '@/lib/ai-error';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { useResizableWidth } from '@/hooks/use-resizable-width';
@@ -57,6 +58,9 @@ type TreeNode = {
 };
 
 const errorText = requestErrorMessage;
+
+// * How often an open local file is checked against the disk (the local file reads share a per-minute budget).
+const LIVE_REFRESH_MS = 8000;
 
 // * Folders first, then files, each alphabetically.
 function buildTree(paths: string[]): TreeNode[] {
@@ -208,6 +212,7 @@ export function CodeViewer({
     repos,
     onViewRepo,
     changes,
+    openRequest = null,
 }: {
     /** * The project whose files are shown. */
     repo: string;
@@ -216,6 +221,8 @@ export function CodeViewer({
     onViewRepo: (repo: string) => void;
     /** * Files the AI changed in this conversation (shown with M/A marks and a diff). */
     changes: AiChatProposal[];
+    /** * A file to open right away (clicked in an edit proposal of the chat). */
+    openRequest?: { repo: string; path: string; id: number } | null;
 }) {
     const { copied: pathCopied, copy: copyPath } = useCopyToClipboard();
     const fileWidth = useResizableWidth('ai-chat.width.file', 704, 320, 1000);
@@ -230,6 +237,8 @@ export function CodeViewer({
     const [content, setContent] = useState<string | null>(null);
     // * For a changed file: the AI's version, shown as a diff against `content` (the file as it is on the default branch).
     const [proposed, setProposed] = useState<string | null>(null);
+    // * For an applied local edit: the file before the edit, rebuilt from the stored diff (the diff's left side).
+    const [base, setBase] = useState<string | null>(null);
     const [fileError, setFileError] = useState<string | null>(null);
     // * An image file arrives as a data URL and is shown as a picture instead of text.
     const [image, setImage] = useState<string | null>(null);
@@ -332,17 +341,95 @@ export function CodeViewer({
         return all;
     }, [openDirs, allPaths, query]);
 
+    // * An open local file follows the disk: every few seconds (tab visible, not while a diff is shown) it is read again and replaced only when its text changed.
+    const contentRef = useRef<string | null>(null);
+
+    useEffect(() => {
+        contentRef.current = content;
+    }, [content]);
+
+    useEffect(() => {
+        if (localRoot === null || selected === null || proposed !== null) {
+            return;
+        }
+
+        let cancelled = false;
+        const timer = window.setInterval(() => {
+            if (document.hidden || contentRef.current === null) {
+                return;
+            }
+
+            api.get<{ content?: string; image?: string }>(
+                '/ai-chat/local/file',
+                { params: { root: localRoot, path: selected } },
+            )
+                .then(({ data }) => {
+                    if (
+                        !cancelled &&
+                        data.content !== undefined &&
+                        data.content !== contentRef.current
+                    ) {
+                        setContent(data.content);
+                    }
+                })
+                .catch(() => undefined);
+        }, LIVE_REFRESH_MS);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [localRoot, selected, proposed]);
+
+    // * Status of the AI's change to the open file when it was loaded: applying it later reloads the file.
+    const loadedStatus = useRef<string | undefined>(undefined);
+    const selectedStatus =
+        selected === null ? undefined : changed.get(selected)?.status;
+
+    useEffect(() => {
+        if (
+            selected !== null &&
+            localRoot !== null &&
+            selectedStatus === 'applied' &&
+            loadedStatus.current !== 'applied'
+        ) {
+            void openFile(selected);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedStatus]);
+
+    // * Opens the file a proposal pointed at, once per request, as soon as the project's tree is known.
+    const handledRequest = useRef<number | null>(null);
+
+    useEffect(() => {
+        if (
+            openRequest !== null &&
+            openRequest.repo === repo &&
+            paths !== null &&
+            handledRequest.current !== openRequest.id
+        ) {
+            handledRequest.current = openRequest.id;
+            void openFile(openRequest.path);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [openRequest, paths, repo]);
+
     const openFile = async (path: string) => {
         const change = changed.get(path);
 
+        // * A local edit that is applied is already in the file: show the file itself, not a diff against itself.
+        const applied = localRoot !== null && change?.status === 'applied';
+
+        loadedStatus.current = change?.status;
         setSelected(path);
         setContent(null);
         setImage(null);
-        setProposed(change?.content ?? null);
+        setProposed(applied ? null : (change?.content ?? null));
+        setBase(null);
         setFileError(null);
 
         // * A file the AI is creating has no current version to load.
-        if (change?.action === 'create') {
+        if (change?.action === 'create' && !applied) {
             setContent('');
 
             return;
@@ -368,6 +455,22 @@ export function CodeViewer({
 
             setImage(file.image ?? null);
             setContent(file.content ?? '');
+
+            // * An applied local edit shows what changed: the file now against the file as it was (rebuilt from the stored diff).
+            if (applied && change?.diff && file.content !== undefined) {
+                const before = reconstructOriginal(file.content, change.diff);
+
+                if (before !== null) {
+                    setBase(before);
+                    setProposed(file.content);
+                } else {
+                    // * The file changed since the edit: show the stored change on its own.
+                    const sides = diffSides(change.diff);
+
+                    setBase(sides.before);
+                    setProposed(sides.after);
+                }
+            }
         } catch (caught) {
             setFileError(errorText(caught, 'Không mở được tệp.'));
         }
@@ -497,7 +600,7 @@ export function CodeViewer({
                                 {proposed !== null ? (
                                     <MonacoDiff
                                         path={selected}
-                                        original={content}
+                                        original={base ?? content}
                                         modified={proposed}
                                     />
                                 ) : (

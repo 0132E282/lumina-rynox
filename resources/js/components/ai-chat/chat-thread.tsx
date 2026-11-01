@@ -1,6 +1,6 @@
 import { Image as ImageIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { MarkdownContent } from '@/components/ai-chat/markdown-content';
+import { ProposalText } from '@/components/ai-chat/proposal-text';
 import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -122,6 +122,7 @@ export function ChatThread({
     items,
     pending,
     onProposalsChange,
+    onOpenFile,
     onChoose,
     userName,
     userAvatar,
@@ -133,6 +134,8 @@ export function ChatThread({
         id: number | string,
         proposals: AiChatProposal[],
     ) => void;
+    /** Opens a file of an edit proposal in the code viewer; without it the file name is plain text. */
+    onOpenFile?: (repo: string, path: string) => void;
     /** Sends a picked ```choices option as the next user message; without it the cards stay read-only. */
     onChoose?: (text: string) => void;
     /** Decorative avatars: the signed-in person's name/photo and the AI account's vendor. */
@@ -262,8 +265,11 @@ export function ChatThread({
                                     </span>
                                 )}
                                 {item.role === 'assistant' ? (
-                                    <MarkdownContent
+                                    <ProposalText
                                         content={item.content}
+                                        hasCard={
+                                            (item.proposals?.length ?? 0) > 0
+                                        }
                                         choices={
                                             onChoose
                                                 ? {
@@ -299,13 +305,17 @@ export function ChatThread({
                             typeof item.id === 'number' &&
                             item.proposals &&
                             item.proposals.length > 0 && (
-                                <ProposalCard
-                                    messageId={item.id}
-                                    proposals={item.proposals}
-                                    onChange={(next) =>
-                                        onProposalsChange(item.id, next)
-                                    }
-                                />
+                                // * Same left edge as the answer text: the avatar (size-7) plus its gap (gap-2).
+                                <div className="min-w-0 sm:pl-9">
+                                    <ProposalCard
+                                        messageId={item.id}
+                                        proposals={item.proposals}
+                                        onChange={(next) =>
+                                            onProposalsChange(item.id, next)
+                                        }
+                                        onOpenFile={onOpenFile}
+                                    />
+                                </div>
                             )}
                     </div>
                 ))}

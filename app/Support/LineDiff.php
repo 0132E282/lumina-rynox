@@ -58,6 +58,77 @@ final class LineDiff
     }
 
     /**
+     * The text before an edit: `$current` is the file after it and `$diff` the stored change. Each changed block is found again by its new lines and swapped for its old ones; null when a block no longer matches (the file changed since) or the diff is not a line diff.
+     */
+    public static function restore(string $current, string $diff): ?string
+    {
+        $groups = [[]];
+
+        foreach (explode("\n", $diff) as $line) {
+            if ($line === '…') {
+                $groups[] = [];
+
+                continue;
+            }
+
+            if (preg_match('/^[ +-] /', $line) !== 1) {
+                return null;
+            }
+
+            $groups[array_key_last($groups)][] = $line;
+        }
+
+        $file = explode("\n", str_replace("\r\n", "\n", $current));
+        $original = [];
+        $cursor = 0;
+
+        foreach (array_filter($groups) as $rows) {
+            $after = [];
+            $before = [];
+
+            foreach ($rows as $row) {
+                $text = substr($row, 2);
+
+                if ($row[0] !== '-') {
+                    $after[] = $text;
+                }
+
+                if ($row[0] !== '+') {
+                    $before[] = $text;
+                }
+            }
+
+            $at = self::find($file, $after, $cursor);
+
+            if ($at === null) {
+                return null;
+            }
+
+            array_push($original, ...array_slice($file, $cursor, $at - $cursor), ...$before);
+            $cursor = $at + count($after);
+        }
+
+        array_push($original, ...array_slice($file, $cursor));
+
+        return implode("\n", $original);
+    }
+
+    /**
+     * @param  list<string>  $lines
+     * @param  list<string>  $needle
+     */
+    private static function find(array $lines, array $needle, int $from): ?int
+    {
+        for ($start = $from; $start <= count($lines) - count($needle); $start++) {
+            if (array_slice($lines, $start, count($needle)) === $needle) {
+                return $start;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * @param  list<string>  $a
      * @param  list<string>  $b
      * @return list<array{0: string, 1: string}> [' '|'+'|'-', line]

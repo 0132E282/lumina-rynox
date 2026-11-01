@@ -21,7 +21,7 @@ export type AiChatProposal = {
     diff: string | null;
     /** * The proposed full text of the file. */
     content: string;
-    status: 'pending' | 'applied' | 'rejected';
+    status: 'pending' | 'applied' | 'rejected' | 'reverted';
     pull_url: string | null;
 };
 

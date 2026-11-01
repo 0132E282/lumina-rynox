@@ -78,6 +78,8 @@ const LANGUAGES: Record<string, string> = {
     css: 'css',
     scss: 'scss',
     html: 'html',
+    // * Monaco has no Vue mode: the HTML one colours <template> and the <script>/<style> blocks inside.
+    vue: 'html',
     md: 'markdown',
     yml: 'yaml',
     yaml: 'yaml',

@@ -19,7 +19,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property string|null $base_sha
  * @property string $content full new content of the file
  * @property string|null $diff
- * @property string $status `pending|applied|rejected`
+ * @property string $status `pending|applied|rejected|reverted`
  * @property string|null $pull_url
  */
 class AiChangeProposal extends Model
@@ -29,6 +29,8 @@ class AiChangeProposal extends Model
     public const STATUS_APPLIED = 'applied';
 
     public const STATUS_REJECTED = 'rejected';
+
+    public const STATUS_REVERTED = 'reverted';
 
     public const MAX_FILES = 10;
 

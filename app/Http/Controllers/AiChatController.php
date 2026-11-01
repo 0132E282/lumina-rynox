@@ -215,6 +215,8 @@ class AiChatController extends Controller
         $files = $request->file('attachments', []);
         $sections = [];
         $notes = [];
+        // * Where the AI works: told to the AI only, never written into the person's message.
+        $where = [];
 
         foreach ($files as $file) {
             $content = $this->attachments->read($file);
@@ -245,23 +247,27 @@ class AiChatController extends Controller
         try {
             if ($localRoot !== null) {
                 $sections[] = $this->workspace->context($localRoot, $text);
-                $notes[] = 'Local: '.$localRoot;
+                $where[] = 'local '.$localRoot;
             }
 
             if ($repo !== null) {
                 $sections[] = $this->github->context($repo, $text);
-                $notes[] = 'GitHub: '.$repo;
+                $where[] = 'GitHub '.$repo;
             }
 
             // * More projects picked together are context only: edits are proposed against the first one.
             foreach ($extraRoots as $extraRoot) {
                 $sections[] = $this->workspace->context($extraRoot, $text);
-                $notes[] = 'Local: '.$extraRoot;
+                $where[] = 'local '.$extraRoot;
             }
 
             foreach ($extraRepos as $extraRepo) {
                 $sections[] = $this->github->context($extraRepo, $text);
-                $notes[] = 'GitHub: '.$extraRepo;
+                $where[] = 'GitHub '.$extraRepo;
+            }
+
+            if ($where !== []) {
+                array_unshift($sections, 'Phạm vi làm việc: '.implode(', ', $where).'. Chỉ đọc và đề xuất sửa trong các dự án này, không làm việc ở nơi khác.');
             }
 
             // * Only the skills, subagents and MCP servers switched on for the picked projects reach the AI; every other MCP server stays blocked.
@@ -287,6 +293,8 @@ class AiChatController extends Controller
             return response()->json(['message' => $exception->getMessage()], 422);
         }
 
+        // * The project the chat belongs to: a GitHub repo, or `local:<folder>` for a folder of this machine (so it is listed under that project).
+        $project = $repo ?? ($localRoot === null ? null : self::LOCAL_PREFIX.$localRoot);
         $stored = $notes === [] ? $text : $text."\n\n".implode(' · ', $notes);
 
         // * Edits the AI proposed become pending proposals (diffed against the repo now); only the person's approval ever writes to GitHub.
@@ -298,12 +306,12 @@ class AiChatController extends Controller
             ['text' => $answer, 'proposals' => $proposals] = $this->buildLocalProposals($localRoot, $answer);
         }
 
-        [$conversation, $userMessage, $assistantMessage] = DB::transaction(function () use ($user, $conversation, $text, $stored, $answer, $proposals, $repo): array {
-            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'repo' => $repo, 'title' => Str::limit(Str::squish($text), AiConversation::TITLE_LENGTH, '…')]);
+        [$conversation, $userMessage, $assistantMessage] = DB::transaction(function () use ($user, $conversation, $text, $stored, $answer, $proposals, $project): array {
+            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'repo' => $project, 'title' => Str::limit(Str::squish($text), AiConversation::TITLE_LENGTH, '…')]);
 
             // * A general chat that turns to a repo joins that project from then on.
-            if ($conversation->repo === null && $repo !== null) {
-                $conversation->update(['repo' => $repo]);
+            if ($conversation->repo === null && $project !== null) {
+                $conversation->update(['repo' => $project]);
             }
 
             $userMessage = $conversation->messages()->create(['role' => AiMessage::ROLE_USER, 'content' => $stored]);
@@ -323,6 +331,11 @@ class AiChatController extends Controller
         if ($request->boolean('auto_pr') && $proposals !== []) {
             $auto = $this->openPullRequest($assistantMessage, 'tạo tự động theo cài đặt "Tự tạo Pull Request"');
             $autoPrError = $auto instanceof JsonResponse ? ($auto->getData(true)['message'] ?? GithubException::FAILED) : null;
+        }
+
+        // * Edits to a folder of this machine are written right away; a conflict or refusal leaves them pending for the person to review.
+        if ($localRoot !== null && $proposals !== []) {
+            $this->applyLocalProposals($request, $assistantMessage);
         }
 
         return response()->json([
@@ -418,6 +431,58 @@ class AiChatController extends Controller
                     activity()->causedBy($request->user())->event('ai-chat.local-write')
                         ->withProperties(['root' => $root, 'path' => $proposal->path, 'before' => $hashes['before'], 'after' => $hashes['after']])
                         ->log('Ghi tệp local từ đề xuất của trợ lý AI.');
+                }
+            } catch (LocalWorkspaceException $exception) {
+                return response()->json(['message' => $exception->getMessage(), 'proposals' => $this->proposalsPayload($message->fresh())], $exception->status);
+            }
+
+            return response()->json(['proposals' => $this->proposalsPayload($message->fresh())]);
+        });
+    }
+
+    /** * Undo edits already written to a local folder: each file goes back to the text before the edit, only while it is still exactly what the edit wrote. */
+    public function revertLocalProposals(Request $request, AiMessage $message): JsonResponse
+    {
+        $this->assertOwned($request, $message);
+
+        if (($refusal = $this->workspace->refusal($request)) !== null) {
+            return response()->json(['message' => $refusal], 422);
+        }
+
+        return DB::transaction(function () use ($request, $message): JsonResponse {
+            $applied = $message->proposals()->where('status', AiChangeProposal::STATUS_APPLIED)->where('repo', 'like', self::LOCAL_PREFIX.'%')->lockForUpdate()->get();
+
+            if ($applied->isEmpty()) {
+                return response()->json(['message' => 'Không có thay đổi nào để hoàn tác.'], 422);
+            }
+
+            try {
+                // * Work out every file first so a file that cannot be restored writes nothing.
+                $restored = [];
+
+                foreach ($applied as $proposal) {
+                    $root = $this->rootOf($proposal);
+                    $before = $proposal->action === 'update' && $proposal->diff !== null ? LineDiff::restore($proposal->content, $proposal->diff) : null;
+
+                    if ($before === null) {
+                        throw new LocalWorkspaceException(LocalWorkspaceException::REVERT_UNAVAILABLE, 422);
+                    }
+
+                    if ($this->workspace->currentHash($root, $proposal->path) !== LocalWorkspace::hash($proposal->content)) {
+                        throw new LocalWorkspaceException(LocalWorkspaceException::CONFLICT, 409);
+                    }
+
+                    $restored[$proposal->id] = $before;
+                }
+
+                foreach ($applied as $proposal) {
+                    $root = $this->rootOf($proposal);
+                    $hashes = $this->workspace->write($root, $proposal->path, $restored[$proposal->id], LocalWorkspace::hash($proposal->content));
+                    $proposal->update(['status' => AiChangeProposal::STATUS_REVERTED]);
+
+                    activity()->causedBy($request->user())->event('ai-chat.local-revert')
+                        ->withProperties(['root' => $root, 'path' => $proposal->path, 'before' => $hashes['before'], 'after' => $hashes['after']])
+                        ->log('Hoàn tác tệp local đã được trợ lý AI sửa.');
                 }
             } catch (LocalWorkspaceException $exception) {
                 return response()->json(['message' => $exception->getMessage(), 'proposals' => $this->proposalsPayload($message->fresh())], $exception->status);

@@ -13,6 +13,7 @@ import {
     send,
 } from '@/actions/App/Http/Controllers/AiChatController';
 import { ActivityTerminal } from '@/components/ai-chat/activity-terminal';
+import { BrowserPane } from '@/components/ai-chat/browser-pane';
 import type { ActivityEntry } from '@/components/ai-chat/activity-terminal';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { AiUsageDialog } from '@/components/ai-chat/ai-usage-dialog';
@@ -173,6 +174,7 @@ function ChatPanel({
     onExtraReposChange: setExtraRepos,
     onLog,
     onChanges,
+    onOpenFile,
     onSession,
     selection,
     onSelectionChange,
@@ -197,6 +199,8 @@ function ChatPanel({
     onLog: (level: ActivityEntry['level'], text: string) => void;
     /** * The files the AI proposed to change in this conversation, for the code viewer. */
     onChanges: (proposals: AiChatProposal[]) => void;
+    /** * Opens a file of an edit proposal in the code viewer. */
+    onOpenFile: (repo: string, path: string) => void;
     /** * The live thread and the picked AI account, for the read-only session panel. */
     onSession: (session: SessionState) => void;
     /** * AI account/model and answer mode, owned by the page so the chat-settings dialog shares them with this composer. */
@@ -535,6 +539,7 @@ function ChatPanel({
                     userAvatar={authUser.avatar}
                     assistant={assistant}
                     onChoose={(text) => void submit(text)}
+                    onOpenFile={onOpenFile}
                     onProposalsChange={(id, proposals) =>
                         setItems((current) =>
                             current.map((item) =>
@@ -749,6 +754,12 @@ export default function AiChatIndex({
             ? viewedRepo
             : repo;
     const [codeOpen, setCodeOpen] = useState(false);
+    // * A file the person clicked in an edit proposal: the code viewer opens it (the id makes the same file open again).
+    const [openRequest, setOpenRequest] = useState<{
+        repo: string;
+        path: string;
+        id: number;
+    } | null>(null);
     const [changes, setChanges] = useState<AiChatProposal[]>([]);
     const [terminalOpen, setTerminalOpen] = useState(false);
     const terminalWidth = useResizableWidth(
@@ -758,6 +769,14 @@ export default function AiChatIndex({
         640,
     );
     const [terminalDragging, setTerminalDragging] = useState(false);
+    const [browserOpen, setBrowserOpen] = useState(false);
+    const browserWidth = useResizableWidth(
+        'ai-chat.width.browser',
+        420,
+        300,
+        900,
+    );
+    const [browserDragging, setBrowserDragging] = useState(false);
     const terminalVisible = recentsTab === 'projects';
     const [agents, setAgents] = useState<AiAgentRun[]>([]);
     const nextAgentId = useRef(0);
@@ -1053,6 +1072,26 @@ export default function AiChatIndex({
                                     type="button"
                                     variant="ghost"
                                     size="icon"
+                                    aria-label="Trình duyệt"
+                                    aria-pressed={browserOpen}
+                                    title="Trình duyệt (xem dự án đang chạy trên máy)"
+                                    onClick={() =>
+                                        setBrowserOpen((open) => !open)
+                                    }
+                                    className={cn(
+                                        'size-8 text-muted-foreground',
+                                        browserOpen &&
+                                            'bg-accent text-accent-foreground',
+                                    )}
+                                >
+                                    <Globe aria-hidden="true" />
+                                </Button>
+                            )}
+                            {terminalVisible && (
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
                                     aria-label="Terminal (nhật ký, chỉ đọc)"
                                     aria-pressed={terminalOpen}
                                     title="Terminal (nhật ký, chỉ đọc)"
@@ -1152,6 +1191,20 @@ export default function AiChatIndex({
                             onAgentEnd={endAgent}
                             onLog={addLog}
                             onChanges={setChanges}
+                            onOpenFile={(file, path) => {
+                                setExtraRepos((current) =>
+                                    file === repo || current.includes(file)
+                                        ? current
+                                        : [...current, file],
+                                );
+                                setViewedRepo(file === repo ? null : file);
+                                setCodeOpen(true);
+                                setOpenRequest({
+                                    repo: file,
+                                    path,
+                                    id: Date.now(),
+                                });
+                            }}
                             onSession={setSession}
                             selection={selection}
                             onSelectionChange={setSelection}
@@ -1286,6 +1339,56 @@ export default function AiChatIndex({
                         {terminal}
                     </SidePanel>
                 )}
+                {wide && terminalVisible && (
+                    <SidePanel
+                        open={browserOpen}
+                        width={browserWidth.width}
+                        dragging={browserDragging}
+                        label="Trình duyệt"
+                        maxWidthClass="max-w-[50%]"
+                    >
+                        <ResizeHandle
+                            label="Đổi độ rộng trình duyệt"
+                            className="translate-x-0"
+                            {...browserWidth.handleProps}
+                            onPointerDown={(event) => {
+                                setBrowserDragging(true);
+                                browserWidth.handleProps.onPointerDown(event);
+                            }}
+                            onPointerUp={() => {
+                                setBrowserDragging(false);
+                                browserWidth.handleProps.onPointerUp();
+                            }}
+                            onPointerCancel={() => {
+                                setBrowserDragging(false);
+                                browserWidth.handleProps.onPointerCancel();
+                            }}
+                        />
+                        {browserOpen && (
+                            <BrowserPane
+                                onClose={() => setBrowserOpen(false)}
+                            />
+                        )}
+                    </SidePanel>
+                )}
+                {!wide && terminalVisible && (
+                    <Sheet open={browserOpen} onOpenChange={setBrowserOpen}>
+                        <SheetContent
+                            side="right"
+                            className="w-full p-0 sm:max-w-md"
+                        >
+                            <SheetTitle className="sr-only">
+                                Trình duyệt
+                            </SheetTitle>
+                            <SheetDescription className="sr-only">
+                                Xem dự án đang chạy trên máy.
+                            </SheetDescription>
+                            <BrowserPane
+                                onClose={() => setBrowserOpen(false)}
+                            />
+                        </SheetContent>
+                    </Sheet>
+                )}
                 {!wide && terminalVisible && (
                     <Sheet open={terminalOpen} onOpenChange={setTerminalOpen}>
                         <SheetContent
@@ -1324,6 +1427,7 @@ export default function AiChatIndex({
                         repos={[repo, ...extraRepos]}
                         onViewRepo={setViewedRepo}
                         changes={changes}
+                        openRequest={openRequest}
                     />
                 )}
             </div>

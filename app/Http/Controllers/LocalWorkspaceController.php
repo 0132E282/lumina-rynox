@@ -38,6 +38,17 @@ class LocalWorkspaceController extends Controller
         return $this->changed($request, fn () => $this->workspace->importProject($data['name'], $data['folders']), 201);
     }
 
+    public function findFolder(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:100'],
+            'entries' => ['present', 'array', 'max:200'],
+            'entries.*' => ['string', 'max:255'],
+        ]);
+
+        return $this->guarded($request, fn (): array => ['folder' => $this->workspace->findFolder($data['name'], $data['entries'])]);
+    }
+
     public function destroyProject(Request $request, string $key): JsonResponse
     {
         return $this->changed($request, fn () => $this->workspace->removeProject($key), 200);

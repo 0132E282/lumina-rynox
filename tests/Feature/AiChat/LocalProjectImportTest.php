@@ -52,6 +52,36 @@ class LocalProjectImportTest extends AiTestCase
         return $this->actingAs($user)->postJson(route('ai-chat.local.projects.store'), ['name' => $name, 'folders' => $folders]);
     }
 
+    public function test_a_browser_picked_folder_is_found_again_by_name_and_content(): void
+    {
+        File::ensureDirectoryExists($this->base.'/home/work/app/src');
+        File::ensureDirectoryExists($this->base.'/home/old/app/other');
+        file_put_contents($this->base.'/home/work/app/composer.json', '{}');
+        file_put_contents($this->base.'/home/old/app/readme.txt', 'x');
+
+        $this->withoutMiddleware(ThrottleRequests::class);
+        $user = $this->admin();
+        $find = fn (string $name, array $entries) => $this->actingAs($user)->postJson(route('ai-chat.local.find-folder'), ['name' => $name, 'entries' => $entries]);
+
+        // * Two folders are called "app": what is inside tells them apart.
+        $find('app', ['src', 'composer.json'])->assertOk()->assertJsonPath('folder', $this->base.'/home/work/app');
+        $find('app', ['other', 'readme.txt'])->assertOk()->assertJsonPath('folder', $this->base.'/home/old/app');
+        // * Nothing tells them apart / nothing like it exists.
+        $find('app', [])->assertStatus(422);
+        $find('app', ['nope.txt'])->assertStatus(404);
+        $find('missing', ['src'])->assertStatus(404);
+    }
+
+    public function test_a_picked_folder_never_resolves_outside_the_base_or_through_links_and_hidden_folders(): void
+    {
+        $this->withoutMiddleware(ThrottleRequests::class);
+        $user = $this->admin();
+
+        foreach (['secret', 'escape', 'keys', '..', 'a/b'] as $name) {
+            $this->actingAs($user)->postJson(route('ai-chat.local.find-folder'), ['name' => $name, 'entries' => []])->assertStatus(in_array($name, ['..', 'a/b'], true) ? 422 : 404);
+        }
+    }
+
     public function test_a_valid_import_appears_next_to_the_env_roots_and_is_readable(): void
     {
         $user = $this->admin();

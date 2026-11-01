@@ -1,4 +1,11 @@
-import { ExternalLink, GitPullRequest, HardDrive } from 'lucide-react';
+import {
+    ExternalLink,
+    Eye,
+    GitPullRequest,
+    HardDrive,
+    Undo2,
+} from 'lucide-react';
+import { FileIcon } from '@/components/ai-chat/file-icon';
 import { invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import { useState } from 'react';
 import {
@@ -13,45 +20,48 @@ import type { AiChatProposal } from '@/types';
 
 const ACTION_LABELS = { create: 'Thêm mới', update: 'Sửa' } as const;
 
-function lineClass(line: string): string {
-    if (line.startsWith('+ ')) {
-        return 'bg-green-500/15 text-green-800 dark:text-green-300';
-    }
-
-    if (line.startsWith('- ')) {
-        return 'bg-red-500/15 text-red-800 dark:text-red-300';
-    }
-
-    return 'text-muted-foreground';
-}
-
-/** * The AI's proposed file edits for one answer: diff per file, then approve (opens a pull request) or dismiss. Nothing reaches GitHub before approval. */
+/** * The AI's proposed file edits for one answer: a row per file (a click opens the file's changed lines in the code viewer), then approve (opens a pull request) or dismiss. Nothing reaches GitHub before approval. */
 export function ProposalCard({
     messageId,
     proposals,
     onChange,
+    onOpenFile,
 }: {
     messageId: number;
     proposals: AiChatProposal[];
     onChange: (proposals: AiChatProposal[]) => void;
+    /** Opens the file in the code viewer (as a diff while the edit is pending). */
+    onOpenFile?: (repo: string, path: string) => void;
 }) {
-    const [busy, setBusy] = useState<'apply' | 'reject' | null>(null);
+    const [busy, setBusy] = useState<'apply' | 'reject' | 'revert' | null>(
+        null,
+    );
     const [error, setError] = useState<string | null>(null);
     const pending = proposals.some((proposal) => proposal.status === 'pending');
     // * Edits for a folder of this machine (`local:{id}`) are applied by writing the file, not by opening a pull request.
     const isLocal = proposals[0].repo.startsWith('local:');
     const pullUrl = proposals.find((proposal) => proposal.pull_url)?.pull_url;
+    // * The first file whose change is still shown in the viewer (a dismissed edit is not).
+    const reviewable = proposals.find(
+        (proposal) =>
+            proposal.status !== 'rejected' && proposal.status !== 'reverted',
+    );
+    // * Local edits are written as soon as the AI answers; an applied one can still be undone.
+    const revertible =
+        isLocal && proposals.some((proposal) => proposal.status === 'applied');
 
-    const run = async (kind: 'apply' | 'reject') => {
+    const run = async (kind: 'apply' | 'reject' | 'revert') => {
         setBusy(kind);
         setError(null);
 
         try {
             const route = kind === 'apply' ? applyProposals : rejectProposals;
             const { data } = await api.post<{ proposals: AiChatProposal[] }>(
-                kind === 'apply' && isLocal
-                    ? `/ai-chat/messages/${messageId}/proposals/apply-local`
-                    : route.url(messageId),
+                kind === 'revert'
+                    ? `/ai-chat/messages/${messageId}/proposals/revert-local`
+                    : kind === 'apply' && isLocal
+                      ? `/ai-chat/messages/${messageId}/proposals/apply-local`
+                      : route.url(messageId),
             );
 
             // * Applied edits change the files: cached trees and file texts of this repo are stale.
@@ -88,41 +98,55 @@ export function ProposalCard({
                     <GitPullRequest aria-hidden="true" className="size-4" />
                 )}
                 {isLocal
-                    ? `Đề xuất sửa ${proposals.length} file trên máy local (${proposals[0].repo.slice(6)})`
+                    ? `Đã sửa ${proposals.length} file trên máy local (${proposals[0].repo.slice(6)})`
                     : `Đề xuất sửa ${proposals.length} file trong ${proposals[0].repo}`}
             </h3>
             <ul className="flex flex-col gap-2">
-                {proposals.map((proposal) => (
-                    <li key={proposal.id}>
-                        <details className="rounded-md border">
-                            <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm">
-                                <span className="truncate font-mono text-xs">
-                                    {proposal.path}
-                                </span>
-                                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                                    {ACTION_LABELS[proposal.action]}
-                                    {proposal.status !== 'pending' &&
-                                        ` · ${proposal.status === 'applied' ? (isLocal ? 'đã áp dụng' : 'đã tạo PR') : 'đã bỏ qua'}`}
-                                </span>
-                            </summary>
-                            <pre className="max-h-80 overflow-auto border-t py-1 font-mono text-xs leading-5">
-                                {(proposal.diff ?? '')
-                                    .split('\n')
-                                    .map((line, index) => (
-                                        <div
-                                            key={index}
-                                            className={cn(
-                                                'px-3 whitespace-pre',
-                                                lineClass(line),
-                                            )}
-                                        >
-                                            {line || ' '}
-                                        </div>
-                                    ))}
-                            </pre>
-                        </details>
-                    </li>
-                ))}
+                {proposals.map((proposal) => {
+                    const label = (
+                        <>
+                            <FileIcon
+                                name={
+                                    proposal.path.split('/').pop() ??
+                                    proposal.path
+                                }
+                            />
+                            <span className="truncate font-mono text-xs">
+                                {proposal.path}
+                            </span>
+                            <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                                {ACTION_LABELS[proposal.action]}
+                                {proposal.status !== 'pending' &&
+                                    ` · ${proposal.status === 'applied' ? (isLocal ? 'đã áp dụng' : 'đã tạo PR') : proposal.status === 'reverted' ? 'đã hoàn tác' : 'đã bỏ qua'}`}
+                            </span>
+                        </>
+                    );
+                    const row =
+                        'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm';
+
+                    return (
+                        <li key={proposal.id}>
+                            {onOpenFile ? (
+                                // * The changed lines open in the code viewer, on the file itself.
+                                <button
+                                    type="button"
+                                    title="Mở file và xem các dòng đã đổi"
+                                    onClick={() =>
+                                        onOpenFile(proposal.repo, proposal.path)
+                                    }
+                                    className={cn(
+                                        row,
+                                        'hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
+                                    )}
+                                >
+                                    {label}
+                                </button>
+                            ) : (
+                                <div className={row}>{label}</div>
+                            )}
+                        </li>
+                    );
+                })}
             </ul>
             {error && (
                 <p role="alert" className="text-sm text-destructive">
@@ -161,16 +185,50 @@ export function ProposalCard({
                     </span>
                 </div>
             ) : (
-                pullUrl && (
-                    <a
-                        href={pullUrl}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="flex w-fit items-center gap-1.5 text-sm underline underline-offset-2"
-                    >
-                        Mở Pull Request trên GitHub
-                        <ExternalLink aria-hidden="true" className="size-3.5" />
-                    </a>
+                (reviewable || revertible || pullUrl) && (
+                    <div className="flex flex-wrap items-center gap-3">
+                        {reviewable && onOpenFile && (
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                    onOpenFile(reviewable.repo, reviewable.path)
+                                }
+                            >
+                                <Eye aria-hidden="true" />
+                                Xem lại thay đổi
+                            </Button>
+                        )}
+                        {revertible && (
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                disabled={busy !== null}
+                                onClick={() => void run('revert')}
+                            >
+                                <Undo2 aria-hidden="true" />
+                                {busy === 'revert'
+                                    ? 'Đang hoàn tác...'
+                                    : 'Hoàn tác'}
+                            </Button>
+                        )}
+                        {pullUrl && (
+                            <a
+                                href={pullUrl}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="flex w-fit items-center gap-1.5 text-sm underline underline-offset-2"
+                            >
+                                Mở Pull Request trên GitHub
+                                <ExternalLink
+                                    aria-hidden="true"
+                                    className="size-3.5"
+                                />
+                            </a>
+                        )}
+                    </div>
                 )
             )}
         </section>

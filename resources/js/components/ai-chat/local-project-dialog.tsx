@@ -16,6 +16,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { useAppForm } from '@/hooks/use-app-form';
 import { api } from '@/lib/api';
+import { pickFolder } from '@/lib/pick-folder';
 import { cn } from '@/lib/utils';
 import type { AiChatRepo } from '@/types';
 
@@ -54,7 +55,7 @@ function defaultProjectName(path: string): string {
         .slice(0, MAX_NAME);
 }
 
-/** * "Tạo dự án" for the local source: a name plus one to five folders of this machine. The browser cannot give a server path, so folders are typed (absolute paths); the server checks each one and never sends the full path back. */
+/** * "Tạo dự án" for the local source: a name plus one to five folders of this machine. The browser cannot give a server path, "Thêm" opens the browser's own folder dialog; only the folder's name and listing go to the server, which finds the real folder again inside the allowed area and checks it again on import. */
 export function LocalProjectDialog({
     open,
     onOpenChange,
@@ -107,8 +108,8 @@ export function LocalProjectDialog({
     const form = useAppForm<ProjectForm>({
         defaultValues: { name: '', folders: [] },
     });
-    const [adding, setAdding] = useState(false);
-    const [draft, setDraft] = useState('');
+    // * True while the machine's own folder dialog is open and we wait for the answer.
+    const [picking, setPicking] = useState(false);
     const [removing, setRemoving] = useState<string | null>(null);
     const name = form.watch('name');
     const folders = form.watch('folders');
@@ -132,17 +133,7 @@ export function LocalProjectDialog({
     const pickLabel =
         ticked.length === 0 ? 'Bỏ chọn dự án' : `Mở ${ticked.length} dự án`;
 
-    const confirmFolder = () => {
-        const value = draft.trim();
-
-        if (!value.startsWith('/')) {
-            form.setError('folders', {
-                message: 'Nhập đường dẫn tuyệt đối, bắt đầu bằng /.',
-            });
-
-            return;
-        }
-
+    const confirmFolder = (value: string) => {
         if (folders.includes(value)) {
             form.setError('folders', { message: 'Thư mục này đã được thêm.' });
 
@@ -156,9 +147,36 @@ export function LocalProjectDialog({
         if (name.trim() === '') {
             form.setValue('name', defaultProjectName(value));
         }
+    };
 
-        setDraft('');
-        setAdding(false);
+    const chooseFolder = async () => {
+        setPicking(true);
+        form.clearErrors('folders');
+
+        try {
+            const picked = await pickFolder();
+
+            if (picked === null) {
+                return;
+            }
+
+            // * The browser gives a name and a listing; the server finds the real folder again (inside the allowed area only).
+            const { data } = await api.post<{ folder: string }>(
+                '/ai-chat/local/find-folder',
+                picked,
+            );
+
+            confirmFolder(data.folder);
+        } catch (caught) {
+            form.setError('folders', {
+                message: requestErrorMessage(
+                    caught,
+                    'Không thêm được thư mục này.',
+                ),
+            });
+        } finally {
+            setPicking(false);
+        }
     };
 
     const removeFolder = (index: number) => {
@@ -172,8 +190,7 @@ export function LocalProjectDialog({
     const close = (next: boolean) => {
         if (!next) {
             form.reset();
-            setAdding(false);
-            setDraft('');
+            setPicking(false);
         }
 
         onOpenChange(next);
@@ -454,7 +471,7 @@ export function LocalProjectDialog({
                                     Thư mục nguồn
                                 </h3>
                                 <div className="flex flex-col gap-2 rounded-xl border p-3">
-                                    {folders.length === 0 && !adding && (
+                                    {folders.length === 0 && !picking && (
                                         <p className="pt-3 text-center text-sm text-muted-foreground">
                                             Thêm thư mục trên{' '}
                                             <span className="text-foreground">
@@ -491,48 +508,22 @@ export function LocalProjectDialog({
                                             </Button>
                                         </div>
                                     ))}
-                                    {adding ? (
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                autoFocus
-                                                value={draft}
-                                                maxLength={500}
-                                                aria-label="Đường dẫn thư mục"
-                                                placeholder="/Users/ban/du-an"
-                                                onChange={(event) =>
-                                                    setDraft(event.target.value)
-                                                }
-                                                onKeyDown={(event) => {
-                                                    if (event.key === 'Enter') {
-                                                        event.preventDefault();
-                                                        confirmFolder();
-                                                    }
-                                                }}
-                                            />
-                                            <Button
-                                                type="button"
-                                                size="sm"
-                                                disabled={draft.trim() === ''}
-                                                onClick={confirmFolder}
-                                            >
-                                                Xác nhận
-                                            </Button>
-                                        </div>
-                                    ) : (
-                                        <Button
-                                            type="button"
-                                            variant="outline"
-                                            size="sm"
-                                            className="self-center rounded-full"
-                                            disabled={
-                                                folders.length >= MAX_FOLDERS
-                                            }
-                                            onClick={() => setAdding(true)}
-                                        >
-                                            <FolderPlus aria-hidden="true" />
-                                            Thêm
-                                        </Button>
-                                    )}
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="self-center rounded-full"
+                                        disabled={
+                                            picking ||
+                                            folders.length >= MAX_FOLDERS
+                                        }
+                                        onClick={() => void chooseFolder()}
+                                    >
+                                        <FolderPlus aria-hidden="true" />
+                                        {picking
+                                            ? 'Đang chờ chọn thư mục...'
+                                            : 'Thêm'}
+                                    </Button>
                                 </div>
                                 {folderError && (
                                     <p

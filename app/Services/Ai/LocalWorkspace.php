@@ -36,6 +36,13 @@ class LocalWorkspace
     private const SENSITIVE_FOLDERS = ['.ssh', '.aws', '.gnupg', '.kube', '.docker', '.config', '.azure', '.gcloud', '.npm', '.cache', '.local', '.trash', 'library', 'appdata'];
 
     /** System locations refused even if a base were set too wide. */
+    // * Folder search for a browser-picked folder: how deep, how many folders at most, and what is never entered.
+    private const FIND_MAX_DEPTH = 7;
+
+    private const FIND_MAX_DIRS = 30000;
+
+    private const FIND_SKIP = ['node_modules', 'vendor', 'library', 'applications', 'pictures', 'music', 'movies'];
+
     private const SYSTEM_PREFIXES = ['/etc', '/proc', '/sys', '/dev', '/boot', '/root', '/bin', '/sbin', '/usr', '/system'];
 
     /** @var array<int, array<string, string>> */
@@ -193,6 +200,90 @@ class LocalWorkspace
         return $real;
     }
 
+    /**
+     * The folder the person picked in the browser's own dialog, found again on this machine: a browser tells only the folder's name and what is directly inside it, never its path. Looks for folders of that name inside the allowed bases and keeps the one holding the listed entries.
+     *
+     * @param  list<string>  $entries  names directly inside the picked folder
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function findFolder(string $name, array $entries): string
+    {
+        if ($name === '' || strlen($name) > 100 || $name === '.' || $name === '..' || preg_match('#[/\x00-\x1f\x7f\\\\]#', $name) === 1) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::BAD_FOLDER, 422, 'folders');
+        }
+
+        $entries = array_values(array_filter($entries, fn (string $entry): bool => $entry !== '' && strlen($entry) <= 255 && $entry !== '..' && preg_match('#[/\x00-\x1f\x7f\\\\]#', $entry) !== 1));
+        $deadline = microtime(true) + 4.0;
+        $visited = 0;
+        $found = [];
+        $unreadable = [];
+
+        foreach ($this->importBases() as $base) {
+            $queue = [[$base, 0]];
+
+            while ($queue !== [] && $visited < self::FIND_MAX_DIRS && microtime(true) < $deadline) {
+                [$dir, $depth] = array_shift($queue);
+                $visited++;
+
+                $children = @scandir($dir);
+
+                if ($children === false) {
+                    // * Typically macOS refusing this process access to Documents/Desktop/Downloads.
+                    $unreadable[] = $dir;
+
+                    continue;
+                }
+
+                foreach ($children as $child) {
+                    $path = $dir.'/'.$child;
+
+                    if ($child[0] === '.' || in_array(strtolower($child), self::FIND_SKIP, true) || is_link($path) || ! is_dir($path)) {
+                        continue;
+                    }
+
+                    // * macOS stores accented names decomposed while a browser sends them composed: compare them in one form.
+                    if ($this->sameName($child, $name) && ! $this->locationRefused($path)) {
+                        $score = count(array_filter($entries, fn (string $entry): bool => file_exists($path.'/'.$entry)));
+                        $found[] = ['path' => $path, 'score' => $entries === [] ? 1.0 : $score / count($entries)];
+                    }
+
+                    if ($depth < self::FIND_MAX_DEPTH) {
+                        $queue[] = [$path, $depth + 1];
+                    }
+                }
+            }
+        }
+
+        // * Only folders that really hold what the dialog showed; several equally good ones cannot be told apart.
+        $found = array_values(array_filter($found, fn (array $candidate): bool => $candidate['score'] >= 0.8));
+        usort($found, fn (array $a, array $b): int => $b['score'] <=> $a['score']);
+
+        if ($found === [] && $unreadable !== []) {
+            throw new LocalWorkspaceException(sprintf(LocalWorkspaceException::FOLDER_UNREADABLE, $unreadable[0]), 500, 'folders');
+        }
+
+        if ($found === []) {
+            throw new LocalWorkspaceException(sprintf(LocalWorkspaceException::FOLDER_NOT_FOUND, $name, implode(', ', $this->importBases())), 404, 'folders');
+        }
+
+        if (count($found) > 1 && $found[0]['score'] === $found[1]['score']) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::FOLDER_AMBIGUOUS, 422, 'folders');
+        }
+
+        return $this->importableFolder($found[0]['path']);
+    }
+
+    private function sameName(string $a, string $b): bool
+    {
+        if (class_exists(\Normalizer::class)) {
+            $a = (string) \Normalizer::normalize($a, \Normalizer::FORM_C);
+            $b = (string) \Normalizer::normalize($b, \Normalizer::FORM_C);
+        }
+
+        return $a === $b;
+    }
+
     /** * True when the (already resolved) folder is outside the allowed bases, is a base itself, a system location or inside a sensitive folder. */
     private function locationRefused(string $real): bool
     {
@@ -221,7 +312,7 @@ class LocalWorkspace
     private function importBases(): array
     {
         $configured = (array) config('ai-chat.local_workspace.import_bases', []);
-        $bases = $configured === [] ? [(string) getenv('HOME')] : array_map('strval', $configured);
+        $bases = $configured === [] ? [CliRuntime::home()] : array_map('strval', $configured);
         $resolved = [];
 
         foreach ($bases as $base) {
