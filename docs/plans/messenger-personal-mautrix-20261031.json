@@ -1,0 +1,1012 @@
+{
+  "title": "Kênh Messenger cá nhân trong /chat qua Matrix (Synapse) + mautrix-meta: đăng nhập bằng cookie dán tay, nhận/trả lời tin",
+  "description": "Tham khảo khi triển khai provider `messenger` (unofficial, active=false tới khi người dùng tự test): Laravel là Matrix client của Synapse nội bộ, gửi cookie facebook.com một lần cho mautrix-meta qua Provisioning API (không lưu cookie), MessengerSender theo ChatSender (txnId pm-{client_token}), lệnh chat:matrix-sync --once mỗi phút, gỡ field Messenger cũ khỏi provider facebook, runbook người dùng tự dựng hạ tầng. Không migration, không sửa bridge, không Instagram, không đăng bài.",
+  "tags": [
+    "messenger",
+    "mautrix",
+    "matrix",
+    "synapse",
+    "bridge",
+    "chat",
+    "integrations",
+    "unofficial",
+    "cookie-login"
+  ],
+  "createdAt": "2026-10-31",
+  "content": {
+    "meta": {
+      "status": "PLANNED_NOT_IMPLEMENTED",
+      "goal": "Trong /chat có kênh Messenger cá nhân: danh sách hội thoại từ portal room, nhận tin văn bản mới, trả lời từ composer. Đăng nhập/kiểm tra/ngắt kết nối ở /integrations/messenger bằng cookie facebook.com người dùng tự dán; Laravel chuyển cookie một lần cho mautrix-meta và không lưu.",
+      "scope": "Provider `messenger` trong config/integrations.php (active=false), gỡ messenger_token/messenger_account/personal_messenger khỏi `facebook`; client Matrix CS API + Provisioning API bridgev2; MessengerChannel; đăng nhập cookie (controller JSON); kiểm tra/ngắt kết nối qua ConfiguredIntegrationProvider; MessengerSender; MessengerInbox + lệnh chat:matrix-sync --once chạy scheduler mỗi phút; đăng ký kênh trong ChatChannels, AppServiceProvider::registerChatRealtime, channel-badge.tsx; nhánh dán cookie ở pages/integrations/show.tsx; test PHPUnit với Http::fake; runbook + testcase thủ công; cập nhật AGENT.md và index tài liệu. Không migration.",
+      "currentState": [
+        "config/integrations.php: chưa có provider `messenger`; `facebook` (active=true, test=facebook) còn field `messenger_account` (text, unofficial), `messenger_token` (secret, unofficial, 'Chuỗi cookie phiên (datr, c_user, xs...)') và quyền `personal_messenger` (unofficial); mô tả 'Kết nối Fanpage (chính thức) và Messenger cá nhân.' Không runtime nào đọc 3 khoá này (grep app/, resources/js/).",
+        "tests/Feature/Integrations/FacebookTokenLoginTest.php::test_messenger_token_requires_risk_acknowledgement (dòng 106-115) đang khẳng định cookie được lưu vào integrations.credentials['messenger_token'] - phải đổi khi gỡ field.",
+        "app/Services/Chat/ChatChannels.php: registry 2 kênh (telegram, zalo), present() dùng biến nhị phân $isZalo; ChatController dùng ChatChannels->sender(provider).",
+        "app/Services/Chat/ChatSender.php: interface ensureCanSend/send/resend. ZaloSender là mẫu: createOrFirst theo (conversation_id, client_token), RateLimiter, ConnectionException/5xx -> unknown, 4xx -> failed, resend claim bằng UPDATE nguyên tử unknown|failed -> sending.",
+        "app/Services/Integrations/ConfiguredIntegrationProvider.php: usesQrLogin() chỉ cho login=qr (connect() không tự đặt connected); disconnect() gọi logoutBridge() Zalo best-effort rồi xoá credentials+meta; test() có telegram/zalo/facebook.",
+        "app/Http/Controllers/ZaloLoginController.php: mẫu validate risk_acknowledged accepted trước khi gọi bridge, trả JSON no-store, chữ lỗi cố định. Route integrations/zalo/qr đặt trước {provider} trong routes/web.php (ràng buộc provider [a-z]+).",
+        "app/Console/Commands/TelegramPollCommand.php: mẫu lệnh poll có --once, trap SIGINT/SIGTERM, ack sau khi lưu. routes/console.php chưa có lệnh chat nào trong scheduler.",
+        "app/Providers/AppServiceProvider.php::registerChatRealtime: Integration::saved chỉ phát ChatChanged cho telegram/zalo.",
+        "resources/js/components/chat/channel-badge.tsx: CHANNELS chỉ telegram/zalo. resources/js/types/integration.ts: IntegrationPage.login = 'qr' | 'oauth' | null. show.tsx rẽ nhánh usesQr/oauth; zalo-qr-dialog.tsx gọi route bằng `api` (axios, '@/lib/api').",
+        "bootstrap/app.php: withExceptions chưa có dontFlash.",
+        "Bảng integrations/conversations/chat_messages/settings đủ cột (design mục 3.1): không cần migration. Setting::get/set lưu JSON theo key.",
+        "Chưa có homeserver, bridge hay spike payload thật: shape JSON các bước Provisioning API, /sync của portal room, com.beeper.message_send_status, ghost id của chủ tài khoản đều CHƯA xác minh bằng chạy thật (design mục 3.6, 3.7)."
+      ],
+      "sources": [
+        "Yêu cầu người giao việc (phiên 2026-10-31): 9 hạng mục phạm vi + quyết định mặc định đã chốt",
+        "docs/design/messenger-personal-mautrix.md (architect, 2026-10-31, đã duyệt)",
+        "docs/plans/meta-messenger-instagram-mautrix-20261027.json (plan khảo sát, chỉ tham chiếu)",
+        "docs/plans/zalo-qr-channel-20261027.json (mẫu cấu trúc plan)",
+        "AGENT.md (quy ước dự án, đồng bộ tài liệu)",
+        "Code hiện có: các file nêu trong currentState"
+      ]
+    },
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "title": "Đăng nhập Messenger bằng cookie facebook.com dán tay",
+        "description": "Trên /integrations/messenger, người dùng dán chuỗi cookie (dạng header `tên=giá_trị; ...` hoặc JSON object), tick rủi ro, bấm Đăng nhập. Laravel gửi cookie cho bridge qua Provisioning API (flow `facebook`) trong một request; thành công thì Integration `messenger` = connected kèm meta.login_id, meta.account_name.",
+        "source": "Design R1, QĐ5, mục 3.5; yêu cầu người dùng mục 3"
+      },
+      {
+        "id": "REQ-002",
+        "title": "Không lưu, không log, không trả lại cookie",
+        "description": "Cookie chỉ đi qua RAM của một request; integrations.credentials của messenger luôn null; không log body request/response; không flash vào session; props/JSON không chứa cookie, token Matrix, provisioning secret hay login process id.",
+        "source": "Design R2, QĐ3, mục 4.2; quyết định đã chốt"
+      },
+      {
+        "id": "REQ-003",
+        "title": "Kiểm tra kết nối và ngắt kết nối",
+        "description": "'Kiểm tra kết nối' hỏi trạng thái login trên bridge và ánh xạ sang status/last_error chữ cố định. 'Ngắt kết nối' logout login trên bridge (best-effort), đặt status disconnected, giữ nguyên hội thoại/tin cũ, chạy được khi bridge chết.",
+        "source": "Design R3, mục 3.2, 3.7 (bảng ánh xạ)"
+      },
+      {
+        "id": "REQ-004",
+        "title": "Nhận tin mới vào /chat",
+        "description": "Tin m.room.message văn bản từ người khác trong portal room thành ChatMessage chiều in (external_message_id = event_id), tăng unread, cập nhật preview; chạy lại cùng batch không tạo trùng.",
+        "source": "Design R4, mục 3.7; yêu cầu người dùng mục 5"
+      },
+      {
+        "id": "REQ-005",
+        "title": "Danh sách hội thoại sau đăng nhập",
+        "description": "Portal room 1-1 đã join thành Conversation (provider messenger, external_chat_id = room_id, title); lần sync đầu và tin cũ hơn thời điểm đăng nhập không tạo ChatMessage; tên rỗng không ghi đè tiêu đề.",
+        "source": "Design R5, mục 3.7 quy tắc 1"
+      },
+      {
+        "id": "REQ-006",
+        "title": "Trả lời tin theo contract ChatSender",
+        "description": "MessengerSender gửi một request PUT send/m.room.message/{txnId}; double submit cùng client_token chỉ 1 request/1 bản ghi; timeout/5xx -> unknown; 4xx -> failed; resend thủ công, claim bằng UPDATE nguyên tử; txnId theo quy tắc BR-004.",
+        "source": "Design R6, mục 3.8; yêu cầu người dùng mục 4"
+      },
+      {
+        "id": "REQ-007",
+        "title": "Cảnh báo rủi ro tài khoản",
+        "description": "Trang hiện cảnh báo unofficial chung + 4 câu cảnh báo riêng (design mục 6); bắt buộc tick 'Tôi hiểu rủi ro' trước khi đăng nhập (server kiểm).",
+        "source": "Design R7, mục 6"
+      },
+      {
+        "id": "REQ-008",
+        "title": "Kênh Messenger hiện trong /chat",
+        "description": "props /chat có channels.messenger (không secret), badge kênh 'M', banner mất kết nối + khoá composer dùng cơ chế sẵn có; thay đổi trạng thái Integration messenger phát ChatChanged.",
+        "source": "Design R8, mục 3.9; yêu cầu người dùng mục 6"
+      },
+      {
+        "id": "REQ-009",
+        "title": "Tài liệu vận hành cho người dùng tự dựng",
+        "description": "Runbook ngắn: Synapse bằng Docker bind 127.0.0.1, tắt federation và đăng ký công khai; tạo user Matrix cho app; cài mautrix-meta bản ghim; đăng ký appservice; biến .env; chạy scheduler; tự đăng nhập bằng tài khoản Facebook phụ. Ghi rõ đây là bước người dùng tự làm, agent không chạy hộ. .env.example có biến rỗng.",
+        "source": "Design R9, mục 5; yêu cầu người dùng mục 9"
+      },
+      {
+        "id": "REQ-010",
+        "title": "Tin media không làm vỡ luồng",
+        "description": "m.image/m.video/m.audio/m.file/m.sticker lưu body 'Loại tin chưa hỗ trợ: <loại>', không tải media.",
+        "source": "Design R10"
+      },
+      {
+        "id": "REQ-011",
+        "title": "Provider `messenger` mới trong config, active=false",
+        "description": "Thêm provider `messenger` nhóm messaging: unofficial=true, login=matrix_bridge, test=matrix_bridge, active=false (người dùng tự bật sau khi tự test), quyền receive/reply/proactive (proactive mặc định tắt), không field secret, không field group_mode.",
+        "source": "Yêu cầu người dùng mục 1; design QĐ2, mục 3.2"
+      },
+      {
+        "id": "REQ-012",
+        "title": "Gỡ field Messenger cũ khỏi provider `facebook`",
+        "description": "Bỏ field messenger_token, messenger_account và quyền personal_messenger khỏi `facebook`; mô tả chỉ còn Fanpage. Giá trị cũ trong DB không bị xoá tự động, chỉ ngừng dùng.",
+        "source": "Yêu cầu người dùng mục 1 + quyết định đã chốt; design QĐ4, Q3"
+      }
+    ],
+    "businessRules": [
+      {
+        "id": "BR-001",
+        "rule": "Laravel không lưu cookie Facebook ở bất kỳ đâu (DB, cache, session, log, file); chỉ chuyển cho bridge trong request đăng nhập. integrations.credentials của messenger = null sau mọi thao tác.",
+        "source": "Quyết định đã chốt; design QĐ3"
+      },
+      {
+        "id": "BR-002",
+        "rule": "Kiểm tra trước khi gọi mạng (fail fast): risk_acknowledged phải accepted; cookies là chuỗi <= 8192 byte, parse được (header hoặc JSON object), tên cookie khớp [A-Za-z0-9_.-]+, giá trị không chứa ';', CR, LF; phải có c_user và xs. Sai bất kỳ điều nào -> 422, không request nào tới bridge.",
+        "source": "Design mục 3.5 bước 1; yêu cầu người dùng mục 3"
+      },
+      {
+        "id": "BR-003",
+        "rule": "Chỉ flow `facebook` (bước `cookies`). Bước `user_input` (2FA/checkpoint) -> huỷ process, 422 'Facebook yêu cầu xác minh thêm. Hãy mở facebook.com trên trình duyệt, hoàn tất xác minh rồi dán lại cookie mới.'; `webauthn`, `client_http` hoặc loại lạ -> huỷ, 422 'Cách đăng nhập này chưa hỗ trợ.'; `display_and_wait` quá 30 giây tổng -> huỷ, 422 'Messenger bridge chờ quá lâu, hãy thử lại.'. Không bao giờ chạy/gửi xuống trình duyệt extract_js/url/user_agent của bước cookies. Chỉ gửi những cookie bridge khai báo trong fields (allowlist).",
+        "source": "Design QĐ5, mục 3.5 bước 2-4"
+      },
+      {
+        "id": "BR-004",
+        "rule": "Gửi tin không retry tự động. txnId lần đầu = `pm-{client_token}` (client_token có ký tự ngoài [A-Za-z0-9._~-] thì dùng base64url không padding). Resend tin chưa có external_message_id (unknown hoặc failed do homeserver 4xx) dùng lại đúng txnId đó; resend tin đã có external_message_id (bridge báo thất bại) dùng txnId mới tất định `pm-{client_token}-{substr(sha1(external_message_id cũ), 0, 8)}`. Timeout/ConnectionException/5xx -> unknown; 401 hoặc errcode M_UNKNOWN_TOKEN -> failed + Integration error; 4xx khác -> failed.",
+        "source": "Yêu cầu người dùng mục 4; design mục 3.8"
+      },
+      {
+        "id": "BR-005",
+        "rule": "Không lưu: tin do chính Matrix user của app gửi (kể cả echo), tin của bot bridge, tin chủ tài khoản tự gửi từ thiết bị khác (ghost của meta.remote_id), sự kiện state/redaction/reaction/edit (m.relates_to.rel_type = m.replace), m.notice.",
+        "source": "Quyết định đã chốt (giống Zalo is_self); design mục 3.7 quy tắc 3"
+      },
+      {
+        "id": "BR-006",
+        "rule": "Chưa làm group_mode, nhóm coi như 'off' cố định: portal room nhóm không tạo Conversation/ChatMessage; MessengerSender chặn gửi vào Conversation type group ('Chưa hỗ trợ trả lời trong nhóm Messenger.'). Không có field group_mode trong config.",
+        "source": "Quyết định đã chốt ('chưa làm group_mode, mặc định off')"
+      },
+      {
+        "id": "BR-007",
+        "rule": "Giảm rủi ro khoá tài khoản: quyền proactive mặc định tắt, khi tắt thì chặn gửi vào hội thoại chưa có tin in; RateLimiter khoá 'messenger-send' tối đa MAUTRIX_META_SEND_PER_MINUTE (mặc định 10) lần/60 giây; trước khi gửi kiểm login trên bridge phải CONNECTED.",
+        "source": "Design mục 3.8 ensureCanSend, mục 6"
+      },
+      {
+        "id": "BR-008",
+        "rule": "Vị trí sync `next_batch` lưu ở settings khoá `chat.matrix.since`, chỉ ghi sau khi transaction của batch commit; lỗi giữa batch -> rollback, không lưu since; chạy lại batch không trùng nhờ unique (conversation_id, external_message_id). Lần đầu (since rỗng) chỉ upsert Conversation; tin có origin_server_ts < meta.connected_at không tạo ChatMessage.",
+        "source": "Yêu cầu người dùng mục 5; design mục 3.7 quy tắc 1, 5, 8, mục 4.1"
+      },
+      {
+        "id": "BR-009",
+        "rule": "Log/exception chỉ chứa chữ cố định + mã (HTTP status, errcode, state bridge), không body, cookie, token, secret, nội dung tin hay message của ConnectionException. MATRIX_ACCESS_TOKEN, MAUTRIX_META_PROVISIONING_SECRET chỉ ở .env (không commit), không vào DB/props.",
+        "source": "Design mục 3.6, 4.2, 4.4"
+      },
+      {
+        "id": "BR-010",
+        "rule": "Không sửa/fork source mautrix-meta (AGPL). Coder/agent không cài, không chạy Synapse/bridge, không dùng cookie thật; mọi test dùng Http::fake/fixture tự tạo. Chạy thử thật là việc người dùng tự làm bằng tài khoản Facebook phụ.",
+        "source": "Quyết định đã chốt; design QĐ7, mục 5.4"
+      },
+      {
+        "id": "BR-011",
+        "rule": "Ngắt kết nối không xoá conversations/chat_messages; logout bridge best-effort (bridge chết vẫn ngắt được); không xoá chat.matrix.since.",
+        "source": "Design R3, mục 3.1 vòng đời"
+      }
+    ],
+    "acceptanceCriteria": [
+      {
+        "id": "AC-001",
+        "requirement": "REQ-001",
+        "criterion": "POST /integrations/messenger/login thiếu risk_acknowledged (hoặc false) -> 422 lỗi trường risk_acknowledged; Http::assertNothingSent()."
+      },
+      {
+        "id": "AC-002",
+        "requirement": "REQ-001",
+        "criterion": "Cookie rỗng, > 8192 byte, sai định dạng, hoặc thiếu c_user hay xs -> 422 lỗi trường cookies với chữ cố định; Http::assertNothingSent()."
+      },
+      {
+        "id": "AC-003",
+        "requirement": "REQ-001",
+        "criterion": "Http::fake Provisioning: logins rỗng -> start(facebook) trả bước cookies (fields datr,c_user,sb,xs) -> step trả complete -> 200 {status:'connected', account_name}; header Cache-Control no-store; Integration messenger status connected, last_error null, meta.login_id/account_name/remote_id/connected_at có giá trị, settings.risk_acknowledged true, settings.permissions mặc định [receive, reply]. Request step chỉ chứa các tên cookie bridge khai báo (cookie thừa bị bỏ)."
+      },
+      {
+        "id": "AC-004",
+        "requirement": "REQ-001",
+        "criterion": "Bước trả về user_input / webauthn / client_http / display_and_wait quá hạn -> có đúng 1 request cancel/{process}, phản hồi 422 chữ cố định theo BR-003, Integration không chuyển connected. Thiếu cookie bắt buộc theo fields của bridge -> cancel + 422 nêu tên cookie thiếu (không nêu giá trị)."
+      },
+      {
+        "id": "AC-005",
+        "requirement": "REQ-001",
+        "criterion": "Env thiếu URL/secret/user_id -> 503 'Chưa cấu hình Messenger bridge.' không gửi request; ConnectionException -> 503 'Messenger bridge không chạy.'; bridge 5xx -> 502 chữ cố định; lock 'messenger-login' đang bị giữ -> 409; đã có login cũ trên bridge -> logout login cũ trước khi start."
+      },
+      {
+        "id": "AC-006",
+        "requirement": "REQ-002",
+        "criterion": "Sau mọi ca test đăng nhập (thành công và lỗi): integrations.credentials của messenger null; Log::spy không nhận chuỗi nào chứa giá trị cookie giả; JSON phản hồi không chứa giá trị cookie, process id, secret; session không có old input 'cookies'; bản ghi integrations (toàn bộ cột) không chứa giá trị cookie."
+      },
+      {
+        "id": "AC-007",
+        "requirement": "REQ-003",
+        "criterion": "POST /integrations/messenger/test: login CONNECTED -> flash success 'Kết nối thành công (<tên>).', status connected; BAD_CREDENTIALS -> status error + last_error 'Phiên Facebook đã hết hạn hoặc bị chặn, hãy dán cookie mới để đăng nhập lại.'; UNKNOWN_ERROR, không còn login, bridge không trả lời -> chữ cố định theo bảng design 3.7; chưa đăng nhập (không meta.login_id) -> báo 'Chưa đăng nhập Messenger, hãy dán cookie để đăng nhập.' không đổi status; thiếu env -> 'Chưa cấu hình Messenger bridge.' không request."
+      },
+      {
+        "id": "AC-008",
+        "requirement": "REQ-003",
+        "criterion": "DELETE /integrations/messenger: gọi POST logout/{meta.login_id} một lần; Integration status disconnected, meta null, credentials null; conversations/chat_messages messenger còn nguyên; bridge ConnectionException vẫn ngắt thành công. PUT /integrations/messenger (lưu quyền) không tự đặt connected."
+      },
+      {
+        "id": "AC-009",
+        "requirement": "REQ-004",
+        "criterion": "chat:matrix-sync --once với fixture incremental: m.text từ ghost người khác trong portal room 1-1 -> 1 ChatMessage in (external_message_id = event_id, sender_name = displayname, body = text), unread_count +1, preview/last_message_at cập nhật; chạy lại cùng fixture (since bị đặt lại) không tạo thêm bản ghi, unread không tăng thêm."
+      },
+      {
+        "id": "AC-010",
+        "requirement": "REQ-004",
+        "criterion": "Các event sau không tạo ChatMessage: sender = MATRIX_USER_ID, sender = bot, sender = ghost của meta.remote_id, m.notice, edit (m.replace), reaction, redaction, state event; quyền receive tắt -> không lưu nhưng since vẫn tiến; Integration không connected hoặc thiếu env -> lệnh thoát SUCCESS, không request."
+      },
+      {
+        "id": "AC-011",
+        "requirement": "REQ-004",
+        "criterion": "Lưu since: sau batch thành công Setting::get('chat.matrix.since') = next_batch của fixture và request kế tiếp gửi since đó; ném exception giữa batch (vd. DB lỗi giả lập) -> rollback, since giữ giá trị cũ, exit FAILURE."
+      },
+      {
+        "id": "AC-012",
+        "requirement": "REQ-005",
+        "criterion": "Fixture initial (since rỗng): portal room 1-1 -> Conversation provider messenger, external_chat_id = room_id, type private, title = m.room.name hoặc displayname ghost còn lại, integration_id; không ChatMessage nào. Room quản lý (chỉ bot + app) và room nhóm bị bỏ qua. Lần sau tên rỗng không ghi đè title. Tin có origin_server_ts < meta.connected_at không tạo ChatMessage."
+      },
+      {
+        "id": "AC-013",
+        "requirement": "REQ-005",
+        "criterion": "Invite có sender là bot hoặc ghost (MAUTRIX_META_GHOST_PREFIX) -> POST join/{roomId} (roomId được rawurlencode); invite từ user khác -> không join."
+      },
+      {
+        "id": "AC-014",
+        "requirement": "REQ-006",
+        "criterion": "MessengerSender::send 200 {event_id} -> sent, external_message_id = event_id, PUT tới .../rooms/{rawurlencode(room)}/send/m.room.message/pm-{client_token}; gọi send 2 lần cùng client_token -> 1 request PUT, 1 ChatMessage."
+      },
+      {
+        "id": "AC-015",
+        "requirement": "REQ-006",
+        "criterion": "PUT ném ConnectionException hoặc trả 500/502 -> unknown với chữ cố định, không request PUT thứ hai; 400/403 -> failed 'Messenger từ chối tin nhắn này, tin chưa được gửi.'; 401 hoặc M_UNKNOWN_TOKEN -> failed + Integration status error 'Token Matrix của app không hợp lệ, kiểm tra MATRIX_ACCESS_TOKEN.'."
+      },
+      {
+        "id": "AC-016",
+        "requirement": "REQ-006",
+        "criterion": "resend tin unknown (không external_message_id) -> PUT cùng txnId pm-{client_token}; resend tin failed đã có external_message_id E -> PUT txnId pm-{client_token}-{substr(sha1(E),0,8)} và external_message_id cập nhật theo event mới; hai resend tuần tự khi lần 1 đã claim -> lần 2 trả null, chỉ 1 request PUT."
+      },
+      {
+        "id": "AC-017",
+        "requirement": "REQ-006",
+        "criterion": "ensureCanSend chặn (ChatUnavailableException, không tạo ChatMessage, không PUT) khi: chưa connected/không login_id, thiếu env, quyền reply tắt, hội thoại group, proactive tắt và chưa có tin in, vượt rate limit, logins() lỗi kết nối hoặc state khác CONNECTED."
+      },
+      {
+        "id": "AC-018",
+        "requirement": "REQ-006",
+        "criterion": "Event com.beeper.message_send_status trỏ tới event_id của tin out đang sent với status FAIL_RETRIABLE/FAIL_PERMANENT (shape theo giả định A6) -> tin chuyển failed 'Messenger không gửi được tin này.'; status SUCCESS không đổi gì."
+      },
+      {
+        "id": "AC-019",
+        "requirement": "REQ-007",
+        "criterion": "GET /integrations/messenger: props integration có unofficial true, login 'matrix_bridge', can_test true, unofficial_warning; trang hiển thị 4 câu cảnh báo riêng và checkbox 'Tôi hiểu rủi ro'; nút Đăng nhập disabled khi chưa tick (kiểm bằng review code + types:check, không có test UI tự động)."
+      },
+      {
+        "id": "AC-020",
+        "requirement": "REQ-008",
+        "criterion": "GET /chat: props channels.messenger có provider, name 'Messenger', status, connected, account = meta.account_name, can_send theo quyền reply; không có khoá nào chứa token/secret/login_id. Mở hội thoại messenger -> channel = messenger. Integration messenger đổi status phát ChatChanged kind channel_status (ChatRealtimeTest). Output channels.telegram/channels.zalo không đổi."
+      },
+      {
+        "id": "AC-021",
+        "requirement": "REQ-008",
+        "criterion": "channel-badge.tsx có messenger {letter 'M', color trùng config, name 'Messenger'}; pnpm run types:check, pnpm run check, pnpm run build pass."
+      },
+      {
+        "id": "AC-022",
+        "requirement": "REQ-010",
+        "criterion": "Fixture có m.image/m.video/m.audio/m.file và event m.sticker -> ChatMessage body lần lượt 'Loại tin chưa hỗ trợ: ảnh|video|tin nhắn thoại|tệp|sticker'; không request tải media."
+      },
+      {
+        "id": "AC-023",
+        "requirement": "REQ-011",
+        "criterion": "config('integrations.providers.messenger'): category messaging, unofficial true, login matrix_bridge, test matrix_bridge, active false, fields [], permissions receive/reply (default true) + proactive (default false); GET /integrations hiện thẻ Messenger trong nhóm Tin nhắn; PUT thiếu risk_acknowledged -> 422."
+      },
+      {
+        "id": "AC-024",
+        "requirement": "REQ-012",
+        "criterion": "config('integrations.providers.facebook') không còn messenger_token, messenger_account, personal_messenger; PUT /integrations/facebook kèm secrets.messenger_token không lưu khoá đó và không bắt tick rủi ro; credentials cũ đã có messenger_token trong DB không bị code xoá (test: bản ghi seed sẵn messenger_token, lưu form facebook, khoá vẫn còn); test facebook cũ còn lại vẫn pass."
+      },
+      {
+        "id": "AC-025",
+        "requirement": "REQ-009",
+        "criterion": "docs/repo/messenger-mautrix-runbook.md tồn tại, có mục 'Người dùng tự làm' cho từng bước dựng Synapse (Docker, 127.0.0.1, federation tắt, đăng ký công khai tắt), tạo user + token, mautrix-meta bản ghim, appservice registration, .env, scheduler, đăng nhập bằng tài khoản phụ, và bảng testcase thủ công mọi dòng Not Run; .env.example có các biến MATRIX_*/MAUTRIX_META_* rỗng; docs/repo/index.json, docs/index.json, AGENT.md cập nhật."
+      }
+    ],
+    "assumptions": [
+      "A1 (đã chốt): Homeserver là Synapse chạy Docker, bind 127.0.0.1, tắt federation và đăng ký công khai. Người dùng tự dựng; repo không thêm docker-compose/script cài đặt.",
+      "A2 (đã chốt): Provider mới `messenger`, không tái dùng `facebook`; `login` = `matrix_bridge`, `test` = `matrix_bridge`; active=false cho tới khi người dùng tự test xong và tự bật.",
+      "A3 (đã chốt): Gỡ messenger_token, messenger_account, personal_messenger khỏi `facebook`; không ghi/xoá dữ liệu DB cũ.",
+      "A4 (đã chốt): Laravel không lưu cookie; bridge tự giữ phiên trong DB riêng của nó.",
+      "A5 (đã chốt): Bỏ qua tin chủ tài khoản gửi từ thiết bị khác; chưa làm group_mode (nhóm = off cố định, BR-006).",
+      "A6 (CHƯA xác minh, theo design mục 3.6/3.7 và hiểu biết về bridgev2/Matrix spec): Provisioning API prefix `/_matrix/provision/v3`, auth `Authorization: Bearer <shared_secret>` + query `user_id`; start trả `{login_id, type, step_id, cookies:{fields:[{id, required, ...}]}}`, step `cookies` nhận body map `{<field id>: <giá trị>}`, complete trả `complete.user_login_id` và profile; trạng thái login lấy từ `GET /v3/logins` (hoặc `/v3/whoami` nếu provisioning.yaml cho thấy state nằm ở đó). Coder đối chiếu với provisioning.yaml của mautrix-go bằng cách ĐỌC tài liệu (không cài), ghi kết quả vào `result` của TASK-002; client parse phòng thủ và chỉ phụ thuộc các khoá tối thiểu.",
+      "A7 (CHƯA xác minh): Event trạng thái gửi `com.beeper.message_send_status` có `content.m.relates_to.event_id` và `content.status` ∈ SUCCESS|PENDING|FAIL_RETRIABLE|FAIL_PERMANENT, chỉ có khi bridge bật `matrix.message_status_events: true`. Nếu sai shape, tin vẫn ở `sent` (không hỏng luồng).",
+      "A8 (CHƯA xác minh): Ghost user có dạng `{MAUTRIX_META_GHOST_PREFIX}{facebook_id}:{server_name}`; tin chủ tài khoản từ thiết bị khác đến từ ghost của meta.remote_id (hoặc từ chính MATRIX_USER_ID qua double puppet - không bật). Portal room nhận diện bằng thành viên bot MAUTRIX_META_BOT_USER_ID; nhóm = số thành viên joined trừ bot, app, ghost của chính mình > 1.",
+      "A9: chat:matrix-sync chạy bằng scheduler mỗi phút với --once (/sync timeout=0), nên độ trễ nhận tin tối đa khoảng 1 phút (không đạt mục tiêu p95 < 10 giây của design mục 1.6 - đánh đổi đã chấp nhận). Chế độ loop vẫn có trong lệnh (như TelegramPollCommand) nhưng không đăng ký daemon. Kiểm login định kỳ: mỗi lần chạy, chỉ gọi logins() khi meta.bridge_state_at cũ hơn 5 phút.",
+      "A10: Không có SyncMessengerConversationsJob sau đăng nhập (design mục 3.5 có đề xuất): hội thoại xuất hiện ở lần scheduler kế tiếp (<= 1 phút). Giảm phạm vi theo YAGNI vì scheduler đã chạy mỗi phút.",
+      "A11: Lớp client đặt ở app/Services/Chat/Matrix/ (MatrixClient, BridgeProvisioningClient, MatrixException) theo design mục 2.1/3.6 thay vì một MessengerBridgeClient duy nhất (người giao việc nêu tên này chỉ là ví dụ); lớp kênh ở app/Services/Chat/Messenger/.",
+      "A12: Màu thương hiệu Messenger dùng '#0084ff' (chốt lúc làm theo design mục 3.2, cùng giá trị ở config và channel-badge.tsx).",
+      "A13: Ô dán cookie dùng component Input type=password sẵn có (cookie là chuỗi một dòng), autoComplete off, xoá state sau khi gửi; không tạo textarea che ký tự riêng.",
+      "A14: Testcase thủ công nằm trong cùng file runbook (một file docs/repo/messenger-mautrix-runbook.md) để gọn; mọi dòng Not Run."
+    ],
+    "openQuestions": [
+      {
+        "question": "Có muốn xoá giá trị `messenger_token` đã lưu trong integrations.credentials của `facebook` (nếu có) không? Đây là ghi dữ liệu thật.",
+        "proposal": "Không làm trong plan này. Nếu đồng ý, làm riêng bằng một lệnh/thao tác được duyệt rõ sau khi xem dữ liệu (chỉ đọc trước)."
+      },
+      {
+        "question": "Khi nào bật `active = true` cho `messenger`?",
+        "proposal": "Người dùng tự bật (sửa config) sau khi chạy xong testcase thủ công bằng tài khoản phụ; không phải việc của coder."
+      },
+      {
+        "question": "Sau khi người dùng chạy thật, nếu shape Provisioning/sync khác giả định A6-A8 thì xử lý thế nào?",
+        "proposal": "Người dùng gửi lại payload đã che (không cookie/token) để mở task sửa nhỏ; plan này không tự spike."
+      }
+    ],
+    "blockers": [
+      "Không có blocker cho phần code: các quyết định Q1-Q6 của design đã được chốt trong lượt giao việc (xem assumptions A1-A5, A9).",
+      "Rủi ro chưa xác minh (không chặn code, chặn việc tuyên bố 'chạy được với Messenger thật'): shape Provisioning API, /sync portal room, status event, ghost id (A6-A8) chỉ kiểm được khi người dùng tự chạy hạ tầng thật."
+    ],
+    "technicalSolution": "1. KIẾN TRÚC (design mục 2)\nTrình duyệt -> Laravel (auth, integrations.update / conversations.view|reply) -> MatrixClient (CS API, Bearer MATRIX_ACCESS_TOKEN) -> Synapse 127.0.0.1:8008 <-> mautrix-meta (appservice) <-> Meta.\nLaravel -> BridgeProvisioningClient (Bearer MAUTRIX_META_PROVISIONING_SECRET, query user_id=MATRIX_USER_ID) -> mautrix-meta /_matrix/provision/v3.\nChỉ chiều Laravel gọi ra (pull); không route /internal mới, không HMAC chiều vào. Synapse và bridge do NGƯỜI DÙNG tự dựng theo runbook; coder không cài/chạy.\n\n2. CẤU HÌNH\nconfig/services.php thêm:\n  'matrix' => ['homeserver_url' => env('MATRIX_HOMESERVER_URL'), 'user_id' => env('MATRIX_USER_ID'), 'access_token' => env('MATRIX_ACCESS_TOKEN')],\n  'mautrix_meta' => ['provisioning_url' => env('MAUTRIX_META_PROVISIONING_URL'), 'provisioning_secret' => env('MAUTRIX_META_PROVISIONING_SECRET'), 'bot_user_id' => env('MAUTRIX_META_BOT_USER_ID'), 'ghost_prefix' => env('MAUTRIX_META_GHOST_PREFIX', '@meta_'), 'send_per_minute' => (int) env('MAUTRIX_META_SEND_PER_MINUTE', 10)].\n.env.example thêm khối biến rỗng (trừ ví dụ URL loopback và SEND_PER_MINUTE=10) kèm chú thích \"người dùng tự điền, không commit .env\".\nconfig/integrations.php: provider 'messenger' (nhóm messaging, sau zalo): name 'Messenger cá nhân', letter 'M', color '#0084ff', unofficial true, login 'matrix_bridge', test 'matrix_bridge', active false, description 'Nhận và trả lời tin Messenger cá nhân qua mautrix-meta, đăng nhập bằng cookie facebook.com. Kết nối không chính thức.', save_label 'Lưu kết nối', fields [], permissions receive/reply (default true), proactive (default false, 'Tắt để giảm rủi ro khoá tài khoản'), steps (design 3.2, bước đầu: 'Tự dựng Synapse và mautrix-meta theo docs/repo/messenger-mautrix-runbook.md.'). facebook: bỏ 2 field + quyền personal_messenger, description 'Kết nối Fanpage (chính thức).'. Cập nhật chú thích đầu file (login=matrix_bridge, test matrix_bridge, số provider 14).\n\n3. LỚP DỊCH VỤ (không migration)\napp/Services/Chat/Matrix/MatrixException.php: final, status:int, errcode:?string (chỉ nhận chuỗi khớp /^M_[A-Z_]+$/), không chứa body; isAmbiguous() = status >= 500; isAuthFailure() = status 401 hoặc errcode M_UNKNOWN_TOKEN; hằng NOT_CONFIGURED (status 503, errcode null, cờ notConfigured).\napp/Services/Chat/Matrix/MatrixClient.php: whoami() 2s; sync(?since, timeoutMs, filterJson) timeout = timeoutMs/1000 + 10; join(roomId) 5s; sendText(roomId, txnId, body) 15s -> event_id. connectTimeout 1s, acceptJson, không retry, rawurlencode roomId/txnId, thiếu homeserver_url/access_token -> MatrixException notConfigured trước khi gọi mạng. ConnectionException để nổi lên cho caller.\napp/Services/Chat/Matrix/BridgeProvisioningClient.php: logins() 2s -> list<{id, state:?string, name:?string, remote_id:?string}>; start(flowId) 15s; step(processId, stepId, type, array data) 30s; cancel(processId) 5s; logout(loginId) 5s. start/step trả LoginStep chuẩn hoá {process_id, step_id, type, fields: list<{id, required}>, complete: {login_id, name, remote_id}|null}; sai kiểu -> MatrixException(502). Thiếu provisioning_url/secret/user_id -> notConfigured.\napp/Services/Chat/Messenger/MessengerChannel.php: PROVIDER='messenger'; integration(); connected() = status connected && meta.login_id là chuỗi; configured() (env đủ); allows() như ZaloChannel (không có permissions -> mặc định, proactive off); markState(Integration, ?state) theo bảng design 3.7 (CONNECTED -> connected/null; CONNECTING/TRANSIENT_DISCONNECT -> giữ status; BAD_CREDENTIALS, UNKNOWN_ERROR, null(=không còn login) -> error + chữ cố định), luôn ghi meta.bridge_state/bridge_state_at (merge meta); markTokenInvalid(). Hằng ERROR_MESSAGES và NOT_CONFIGURED='Chưa cấu hình Messenger bridge.', BRIDGE_DOWN='Messenger bridge không chạy.'.\napp/Services/Chat/Messenger/MessengerCookies.php: parse(string): array<string,string> (header hoặc JSON object), ném InvalidArgumentException không chứa giá trị; hasRequired(c_user, xs).\n\n4. LUỒNG ĐĂNG NHẬP (design 3.5)\nPOST integrations/messenger/login (đặt trước {provider}, middleware AuthorizeResource integrations,update + throttle:5,10, name integrations.messenger.login) -> MessengerLoginController::login:\n a) validate risk_acknowledged accepted, cookies required|string|max:8192; parse + c_user/xs -> 422 (ValidationException trường cookies, chữ cố định).\n b) configured() sai -> 503 NOT_CONFIGURED.\n c) Cache::lock('messenger-login', 60)->get() thất bại -> 409.\n d) logins(): logout từng login cũ; start('facebook'); type phải 'cookies' (khác -> cancel + 422); so fields required với cookie đã dán -> thiếu thì cancel + 422 'Thiếu cookie bắt buộc: <tên>'; gửi step với map chỉ gồm field id bridge khai báo.\n e) Vòng: complete -> lưu; display_and_wait -> step(type display_and_wait, []) lặp tới khi tổng 30s (now()-based deadline) -> quá thì cancel + 422; user_input/webauthn/client_http/lạ -> cancel + 422 (BR-003). MatrixException 4xx ở step -> cancel + 422 'Facebook không chấp nhận cookie này. Hãy đăng nhập lại facebook.com và dán cookie mới.'; 5xx -> cancel best-effort + 502 'Messenger bridge trả về lỗi, hãy thử lại sau.'; ConnectionException -> 503 BRIDGE_DOWN.\n f) Lưu khi complete: forceFill status connected, last_error null, last_checked_at now, credentials null, meta merge {login_id, account_name, remote_id, connected_at ISO, bridge_state 'CONNECTED', bridge_state_at}, settings {fields: [], permissions: giữ hoặc mặc định, risk_acknowledged true}. Trả 200 {status, account_name} no-store. Lock release trong finally.\n bootstrap/app.php: $exceptions->dontFlash(['cookies']). Cookie không bao giờ được đặt vào exception message/context/log.\n\n5. KIỂM TRA / NGẮT KẾT NỐI (ConfiguredIntegrationProvider)\nusesQrLogin() đổi thành usesBridgeLogin(): login ∈ {qr, matrix_bridge} -> connect() không tự đặt connected. test() thêm 'matrix_bridge' => testMessenger(): not configured -> failed NOT_CONFIGURED (không record); không login_id -> failed 'Chưa đăng nhập Messenger, hãy dán cookie để đăng nhập.' (không record); logins() ConnectionException -> record failed BRIDGE_DOWN; tìm login theo meta.login_id: CONNECTED -> passed 'Kết nối thành công (<name>).'; khác/không thấy -> markState + failed với chữ cố định. disconnect(): login matrix_bridge -> logout(meta.login_id) best-effort (catch ConnectionException|MatrixException) TRƯỚC khi xoá meta; logoutBridge() Zalo chỉ cho qr. IntegrationController không cần đổi (bridge deferred chỉ cho qr).\n\n6. GỬI TIN (MessengerSender implements ChatSender, design 3.8)\nensureCanSend theo thứ tự (chữ cố định): connected ('Messenger đang mất kết nối, chưa thể gửi tin.'), configured (NOT_CONFIGURED), reply ('Quyền \"Trả lời tin nhắn\" của Messenger đang tắt.'), group ('Chưa hỗ trợ trả lời trong nhóm Messenger.'), proactive ('Chưa có tin đến từ hội thoại này; gửi chủ động đang tắt.'), RateLimiter 'messenger-send' ('Đang giới hạn tốc độ gửi để bảo vệ tài khoản. Thử lại sau N giây.'), logins() state của login_id phải CONNECTED (lỗi kết nối -> BRIDGE_DOWN; khác -> 'Messenger bridge chưa đăng nhập hoặc đang kết nối lại, thử lại sau.').\nsend(): như ZaloSender (createOrFirst theo client_token, chỉ gửi khi wasRecentlyCreated). resend(): claim UPDATE nguyên tử unknown|failed -> sending. deliver(): RateLimiter::hit; txnId theo BR-004; sendText; kết quả theo BR-004 / AC-015; 200 -> sent + external_message_id = event_id.\n\n7. ĐỒNG BỘ (chat:matrix-sync, MessengerInbox, design 3.7)\napp/Console/Commands/MatrixSyncCommand.php: signature 'chat:matrix-sync {--once}', mẫu TelegramPollCommand (trap tín hiệu, pause). Mỗi vòng: configured() sai -> line NOT_CONFIGURED, SUCCESS, không request; connected() null -> line, SUCCESS; Cache::lock('chat-matrix-sync', 120) không lấy được -> SUCCESS. since = Setting::get('chat.matrix.since'); sync(since, once ? 0 : 25000, filter) (filter inline: room.timeline.limit 50; lần đầu limit 1). Invite từ bot/ghost -> join (lỗi join chỉ ghi line cố định, tiếp tục). MessengerInbox::ingest(Integration, array sync, bool initial) trong DB::transaction -> trả {conversations, stored, failedStatuses}; sau commit Setting::set('chat.matrix.since', next_batch). Lỗi: ConnectionException -> 'Không kết nối được tới Matrix homeserver.' FAILURE; MatrixException isAuthFailure -> markTokenInvalid + FAILURE; exception khác giữa batch -> rollback, không lưu since, FAILURE (không log body). Kiểm login: nếu meta.bridge_state_at null hoặc > 5 phút -> logins() -> markState (lỗi nuốt, giữ status).\nMessengerInbox: phân loại room (Conversation messenger đã tồn tại, hoặc state/timeline có m.room.member của bot ở trạng thái join); bỏ room quản lý và room nhóm (A8, BR-006); upsert Conversation (createOrFirst provider+external_chat_id, title không ghi đè bằng rỗng, type private, integration_id); khi initial: không tạo ChatMessage. Timeline: lọc theo BR-005, bỏ origin_server_ts < meta.connected_at; body theo msgtype (m.text/m.emote -> text; m.image 'ảnh', m.video 'video', m.audio 'tin nhắn thoại', m.file 'tệp', event m.sticker 'sticker', khác 'khác'); createOrFirst theo (conversation_id, external_message_id=event_id), unread++, preview chỉ khi mới hơn (mẫu ZaloInbox::ingest). Event com.beeper.message_send_status (A7) FAIL_* -> ChatMessage out cùng conversation có external_message_id = relates_to.event_id và send_status sent -> failed 'Messenger không gửi được tin này.'. Quyền receive tắt -> bỏ tin (since vẫn tiến).\nroutes/console.php: Schedule::command('chat:matrix-sync --once')->everyMinute()->withoutOverlapping(); chú thích: cần schedule:run/schedule:work, lệnh tự bỏ qua khi chưa cấu hình.\n\n8. /chat VÀ REALTIME\nChatChannels: constructor thêm MessengerSender, MessengerChannel; providers() thêm 'messenger'; sender() thêm nhánh; present() đổi $isZalo thành match theo provider, messenger: name 'Messenger', display_name null, bot_username null, account meta.account_name, can_send allows(reply). Output Telegram/Zalo giữ nguyên.\nAppServiceProvider::registerChatRealtime: danh sách provider thêm MessengerChannel::PROVIDER.\nFrontend: channel-badge.tsx thêm messenger; types/integration.ts login thêm 'matrix_bridge'; component mới components/integrations/messenger-cookie-login.tsx (gọi route Wayfinder integrations.messenger.login bằng `api` như zalo-qr-dialog.tsx, Input type=password, Checkbox rủi ro dùng chung state form trang, loading/error, xoá cookie khỏi state sau khi gửi, router.reload khi thành công); show.tsx: nhánh integration.login === 'matrix_bridge' hiện 4 câu cảnh báo + component, giữ nút Lưu (quyền), Kiểm tra, Ngắt kết nối sẵn có. Route Wayfinder sinh tự động (plugin vite / php artisan wayfinder:generate), không sửa tay resources/js/routes|actions.\n\n9. MIGRATION / ROLLBACK\nKhông migration, không ghi dữ liệu thật. Rollback tính năng: xoá provider messenger khỏi config (hoặc giữ active=false), bỏ dòng scheduler, revert các file; dữ liệu conversations/chat_messages messenger (nếu người dùng đã chạy thật) giữ nguyên; xoá setting chat.matrix.since chỉ khi người dùng duyệt. Gỡ field facebook có thể revert bằng cách khôi phục 3 khoá config; dữ liệu credentials cũ không bị đụng nên không mất.\n\n10. KIỂM THỬ\nPHPUnit Feature với RefreshDatabase + Http::fake (+ Http::preventStrayRequests trong test mới) - không gọi Synapse/bridge thật, không cookie thật (giá trị giả kiểu 'c_user=100000000000001; xs=FAKE-XS-VALUE'). Fixture /sync tự tạo theo shape Matrix CS spec trong tests/Feature/Messenger/fixtures/, ghi rõ là fixture tự tạo chưa đối chiếu payload thật. Lệnh: php artisan test --filter=Messenger (và các test chat/integrations bị đụng), composer run lint:check, composer run types:check, pnpm run types:check, pnpm run check, pnpm run format:check, pnpm run build.",
+    "tasks": [
+      {
+        "id": "TASK-001",
+        "title": "Config: thêm provider `messenger` (active=false), gỡ 3 khoá Messenger cũ khỏi `facebook`, thêm services.matrix/mautrix_meta và biến .env.example",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "Mọi task khác đọc định nghĩa provider và cấu hình env; gỡ field cũ chấm dứt nơi lưu cookie thứ hai (BR-001).",
+        "requirements": [
+          "REQ-011",
+          "REQ-012",
+          "REQ-007",
+          "BR-001",
+          "BR-006",
+          "BR-007",
+          "BR-009"
+        ],
+        "acceptanceCriteria": ["AC-023", "AC-024"],
+        "inScope": "config/integrations.php (provider messenger, sửa facebook, chú thích đầu file), config/services.php (khối matrix, mautrix_meta), .env.example (biến rỗng + chú thích), đổi test facebook cũ, test cấu hình mới.",
+        "outOfScope": "Xoá dữ liệu messenger_token cũ trong DB; bật active=true; field group_mode; bất kỳ runtime nào (TASK-002+).",
+        "dependencies": [],
+        "approach": "1. config/integrations.php: thêm khoá 'messenger' ngay sau 'zalo' theo technicalSolution mục 2 (fields => [], permissions receive/reply/proactive, steps có bước 'Tự dựng Synapse và mautrix-meta theo docs/repo/messenger-mautrix-runbook.md.' và các bước dán cookie theo design 3.2). 2. facebook: xoá field messenger_account, messenger_token và permission personal_messenger; description 'Kết nối Fanpage (chính thức).'. 3. Sửa chú thích đầu file: số provider 14, `login` = `matrix_bridge` (đăng nhập qua Provisioning API của bridge, lưu form không tự đặt connected), `test` thêm matrix_bridge. 4. config/services.php: thêm 'matrix' và 'mautrix_meta' (technicalSolution mục 2) với chú thích loopback, không commit secret. 5. .env.example: khối MATRIX_HOMESERVER_URL=http://127.0.0.1:8008, MATRIX_USER_ID=, MATRIX_ACCESS_TOKEN=, MAUTRIX_META_PROVISIONING_URL=http://127.0.0.1:29319, MAUTRIX_META_PROVISIONING_SECRET=, MAUTRIX_META_BOT_USER_ID=, MAUTRIX_META_GHOST_PREFIX=@meta_, MAUTRIX_META_SEND_PER_MINUTE=10. 6. FacebookTokenLoginTest: thay test_messenger_token_requires_risk_acknowledgement bằng test khẳng định secrets.messenger_token bị bỏ qua (không lưu, không bắt tick) và test credentials cũ có messenger_token không bị xoá khi lưu form facebook (connect() merge credentials). 7. Kiểm UpdateIntegrationRequest/IntegrationManager chạy được với fields rỗng (đọc code; nếu lỗi thì báo, không tự mở rộng sửa).",
+        "test": "tests/Feature/Messenger/MessengerConfigTest.php (MỚI): đọc config messenger đúng khoá (AC-023); GET /integrations/messenger 200 props integration.login = 'matrix_bridge', unofficial true, can_test true, active false; GET /integrations có thẻ messenger nhóm messaging; PUT /integrations/messenger permissions [receive, reply] thiếu risk_acknowledged -> 422, có tick -> lưu, status không thành connected. tests/Feature/Integrations/FacebookTokenLoginTest.php (SỬA): ca mới theo AC-024; các ca Page token cũ vẫn pass. Chạy: php artisan test --filter='MessengerConfigTest|FacebookTokenLoginTest'.",
+        "doneWhen": "Test trên pass thật; composer run lint:check sạch trên file đổi; grep 'messenger_token|personal_messenger' trong config/ và tests/ không còn (trừ ca test khẳng định bị bỏ qua/dữ liệu cũ).",
+        "rollback": "Revert config/integrations.php, config/services.php, .env.example, FacebookTokenLoginTest; xoá MessengerConfigTest.",
+        "risks": "Test 'lưu form không thành connected' phụ thuộc TASK-003 (usesBridgeLogin); nếu TASK-003 chưa xong thì ca này tạm đặt ở TASK-003 - coder ghi rõ trong result. Gỡ field làm người dùng cũ mất ô dán cookie ở thẻ Facebook (chủ đích).",
+        "filesToChange": [
+          {
+            "path": "config/integrations.php",
+            "changes": "Thêm provider messenger; bỏ 2 field + 1 quyền của facebook; sửa description facebook và chú thích đầu file."
+          },
+          {
+            "path": "config/services.php",
+            "changes": "Thêm khối 'matrix' và 'mautrix_meta' đọc env."
+          },
+          {
+            "path": ".env.example",
+            "changes": "Thêm khối biến MATRIX_* / MAUTRIX_META_* (secret để rỗng)."
+          },
+          {
+            "path": "tests/Feature/Integrations/FacebookTokenLoginTest.php",
+            "changes": "Thay test_messenger_token_requires_risk_acknowledgement bằng ca field bị bỏ qua + dữ liệu cũ không bị xoá."
+          },
+          {
+            "path": "tests/Feature/Messenger/MessengerConfigTest.php",
+            "changes": "MỚI (thư mục tests/Feature/Messenger chưa có)."
+          }
+        ],
+        "result": "Done cùng lượt với TASK-002/003 (cùng phiên làm việc nên ca 'lưu form không thành connected' viết thẳng vào MessengerConfigTest, không cần tách sang TASK-003). php artisan test --filter='MessengerConfigTest|FacebookTokenLoginTest' pass (xem group messenger-foundation). composer run lint:check (--dirty) và vendor/bin/phpstan analyse (scope các file đổi) sạch. AC-023, AC-024 đạt.",
+        "filesActuallyChanged": [
+          "config/integrations.php",
+          "config/services.php",
+          ".env.example",
+          "tests/Feature/Integrations/FacebookTokenLoginTest.php",
+          "tests/Feature/Messenger/MessengerConfigTest.php"
+        ]
+      },
+      {
+        "id": "TASK-002",
+        "title": "Client Matrix CS API + Provisioning API bridgev2 (MatrixClient, BridgeProvisioningClient, MatrixException) và MessengerChannel",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "Login, sender, sync, test kết nối đều gọi qua hai client này; MessengerChannel là nơi duy nhất ánh xạ trạng thái.",
+        "requirements": [
+          "REQ-001",
+          "REQ-003",
+          "REQ-004",
+          "REQ-006",
+          "BR-009",
+          "BR-010"
+        ],
+        "acceptanceCriteria": ["AC-005", "AC-007", "AC-015"],
+        "inScope": "3 lớp trong app/Services/Chat/Matrix/, MessengerChannel trong app/Services/Chat/Messenger/, unit-level feature test với Http::fake; đối chiếu shape Provisioning API bằng cách đọc tài liệu provisioning.yaml của mautrix-go (không cài, không chạy).",
+        "outOfScope": "Controller, sender, inbox, lệnh; gọi homeserver/bridge thật; sửa source bridge.",
+        "dependencies": ["TASK-001"],
+        "approach": "1. MatrixException(int status, ?string errcode, bool notConfigured=false): message cố định 'Matrix request failed (HTTP {status}).', không body; isAmbiguous(), isAuthFailure(). 2. MatrixClient theo mẫu ZaloBridgeClient::call/request: base rtrim(services.matrix.homeserver_url), withToken(access_token), connectTimeout 1, acceptJson; whoami/sync/join/sendText như technicalSolution mục 3; path /_matrix/client/v3/...; rawurlencode cho roomId, txnId; sendText body {msgtype:'m.text', body}; trả event_id string hoặc MatrixException(502). 3. BridgeProvisioningClient: base rtrim(provisioning_url).'/_matrix/provision/v3', withToken(secret), luôn kèm query user_id; logins/start/step/cancel/logout như mục 3; chuẩn hoá LoginStep; parse phòng thủ. 4. Đọc provisioning.yaml (mautrix/go, bridgev2/matrix) để xác nhận path logins/whoami, shape start/step/complete, field id của cookie; ghi 'đã xác minh từ tài liệu / còn giả định' vào result của task (A6). Không xác minh được thì giữ giả định A6 và parse tối thiểu. 5. MessengerChannel theo technicalSolution mục 3 (markState theo bảng design 3.7, merge meta, không đổi status khi state CONNECTING/TRANSIENT_DISCONNECT).",
+        "test": "tests/Feature/Messenger/MatrixClientsTest.php (MỚI, Http::preventStrayRequests): header Authorization Bearer đúng token/secret; query user_id luôn có ở provisioning; roomId '!abc:pm.local' và txnId được rawurlencode trong URL PUT; sync gửi since/timeout/filter; thiếu env -> MatrixException notConfigured và Http::assertNothingSent; 404 {errcode:'M_NOT_FOUND', error:'x'} -> MatrixException status 404 errcode M_NOT_FOUND, getMessage() không chứa 'x'; errcode lạ không theo mẫu -> null; JSON sai kiểu -> 502; start/step trả LoginStep chuẩn hoá cho cookies/complete/user_input. tests/Feature/Messenger/MessengerChannelTest.php (MỚI): markState CONNECTED/BAD_CREDENTIALS/UNKNOWN_ERROR/null/TRANSIENT_DISCONNECT -> status/last_error đúng bảng; meta cũ (login_id) được giữ khi merge; connected() null khi thiếu login_id; allows() mặc định proactive false.",
+        "doneWhen": "Test pass thật; composer run types:check (PHPStan) sạch cho file mới; result ghi rõ phần A6 đã/ chưa xác minh từ tài liệu.",
+        "rollback": "Xoá app/Services/Chat/Matrix/ và app/Services/Chat/Messenger/MessengerChannel.php cùng 2 test.",
+        "risks": "Shape Provisioning API có thể khác giả định (A6) - chỉ lộ ra khi người dùng chạy thật. Http facade timeout long-poll ở chế độ loop cần lớn hơn timeoutMs.",
+        "filesToChange": [
+          {
+            "path": "app/Services/Chat/Matrix/MatrixException.php",
+            "changes": "MỚI (thư mục app/Services/Chat/Matrix chưa có)."
+          },
+          {
+            "path": "app/Services/Chat/Matrix/MatrixClient.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "app/Services/Chat/Matrix/BridgeProvisioningClient.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "app/Services/Chat/Messenger/MessengerChannel.php",
+            "changes": "MỚI (thư mục app/Services/Chat/Messenger chưa có)."
+          },
+          {
+            "path": "tests/Feature/Messenger/MatrixClientsTest.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "tests/Feature/Messenger/MessengerChannelTest.php",
+            "changes": "MỚI."
+          }
+        ],
+        "result": "A6 KHÔNG xác minh được từ tài liệu: môi trường làm việc không có truy cập mạng để đọc provisioning.yaml của mautrix-go/bridgev2, và không được phép cài/chạy bridge thật. BridgeProvisioningClient giữ nguyên giả định A6 (endpoint /_matrix/provision/v3/{logins,login/start/{flow},login/step/{process}/{step}/{type},login/cancel/{process},logout/{id}}, Bearer secret + query user_id) và parse phòng thủ tối thiểu (normalizeStep đọc login_id/step_id/type rồi khoá con theo type; sai hình dạng -> MatrixException(502), không lộ body). Toàn bộ test dùng Http::fake với response JSON tự dựng theo giả định này, không đối chiếu được bridge thật. MatrixClientsTest + MessengerChannelTest pass (xem group messenger-foundation). composer run lint:check và vendor/bin/phpstan analyse (scope) sạch.",
+        "filesActuallyChanged": [
+          "app/Services/Chat/Matrix/MatrixException.php",
+          "app/Services/Chat/Matrix/MatrixClient.php",
+          "app/Services/Chat/Matrix/BridgeProvisioningClient.php",
+          "app/Services/Chat/Messenger/MessengerChannel.php",
+          "tests/Feature/Messenger/MatrixClientsTest.php",
+          "tests/Feature/Messenger/MessengerChannelTest.php"
+        ]
+      },
+      {
+        "id": "TASK-003",
+        "title": "Kiểm tra kết nối và ngắt kết nối Messenger trong ConfiguredIntegrationProvider (login matrix_bridge)",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "REQ-003; lưu form không được tự đặt connected, ngắt phải chạy được khi bridge chết.",
+        "requirements": ["REQ-003", "BR-011", "BR-009"],
+        "acceptanceCriteria": ["AC-007", "AC-008"],
+        "inScope": "usesQrLogin -> usesBridgeLogin (qr + matrix_bridge) trong connect(); test() nhánh matrix_bridge; disconnect() logout bridge Messenger best-effort; test feature.",
+        "outOfScope": "Đổi hành vi Zalo/Telegram/Facebook; UI.",
+        "dependencies": ["TASK-002"],
+        "approach": "1. Đổi tên/phạm vi usesQrLogin() thành usesBridgeLogin() trả true cho login 'qr' hoặc 'matrix_bridge' (connect giữ status/last_error cũ). 2. disconnect(): đọc meta.login_id trước khi fill; nếu login 'matrix_bridge' và có login_id -> app(BridgeProvisioningClient::class)->logout() trong try/catch ConnectionException|MatrixException; nếu 'qr' -> logoutBridge() như cũ. 3. test(): 'matrix_bridge' => testMessenger() theo technicalSolution mục 5; dùng recordTest() có sẵn cho kết quả có ghi; với state khác CONNECTED gọi MessengerChannel::markState rồi trả failed với last_error tương ứng. 4. Cập nhật docblock lớp (thêm chiến lược matrix_bridge).",
+        "test": "tests/Feature/Messenger/MessengerIntegrationTest.php (MỚI, Http::fake provisioning): POST /integrations/messenger/test với logins [{id:'L1', state:'CONNECTED', name:'An'}] -> flash success chứa 'An', status connected; state BAD_CREDENTIALS -> status error + last_error chữ cố định; logins rỗng -> error 'Messenger chưa đăng nhập trên bridge, hãy đăng nhập lại.'; ConnectionException -> 'Messenger bridge không chạy.'; không login_id -> thông báo chưa đăng nhập, status không đổi; thiếu env -> NOT_CONFIGURED, Http::assertNothingSent. DELETE /integrations/messenger -> 1 request logout/L1, status disconnected, meta null, Conversation + ChatMessage messenger seed sẵn còn nguyên; ConnectionException -> vẫn disconnected. PUT /integrations/messenger có tick -> status giữ disconnected. Hồi quy: php artisan test --filter='QrLoginTest|FacebookTokenLoginTest|LinkedInOAuthTest' vẫn pass.",
+        "doneWhen": "Test mới + hồi quy pass thật; PHPStan sạch.",
+        "rollback": "Revert ConfiguredIntegrationProvider.php; xoá MessengerIntegrationTest.",
+        "risks": "Đổi tên usesQrLogin có thể ảnh hưởng chỗ khác gọi (hiện là private, chỉ dùng trong lớp - đã kiểm).",
+        "filesToChange": [
+          {
+            "path": "app/Services/Integrations/ConfiguredIntegrationProvider.php",
+            "changes": "usesBridgeLogin, nhánh test matrix_bridge, disconnect logout Messenger best-effort."
+          },
+          {
+            "path": "tests/Feature/Messenger/MessengerIntegrationTest.php",
+            "changes": "MỚI."
+          }
+        ],
+        "result": "php artisan test --filter='MessengerIntegrationTest|QrLoginTest|FacebookTokenLoginTest' pass (hồi quy giữ nguyên). vendor/bin/phpstan analyse ConfiguredIntegrationProvider.php sạch. AC-007, AC-008 đạt bằng Http::fake; chưa xác minh với bridge thật.",
+        "filesActuallyChanged": [
+          "app/Services/Integrations/ConfiguredIntegrationProvider.php",
+          "tests/Feature/Messenger/MessengerIntegrationTest.php"
+        ]
+      },
+      {
+        "id": "TASK-004",
+        "title": "Luồng đăng nhập cookie: MessengerCookies, MessengerLoginController, route integrations.messenger.login, dontFlash cookies",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "REQ-001/REQ-002 cốt lõi và có rủi ro lộ cookie cao nhất.",
+        "requirements": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-007",
+          "BR-001",
+          "BR-002",
+          "BR-003",
+          "BR-009"
+        ],
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-002",
+          "AC-003",
+          "AC-004",
+          "AC-005",
+          "AC-006"
+        ],
+        "inScope": "Parser cookie, controller JSON một request (start + step + chờ complete), lock đồng thời, lưu Integration không credentials, route + throttle, dontFlash, feature test.",
+        "outOfScope": "UI (TASK-007); flow messenger.com/password; chạy extract_js; job sync sau login (A10); lưu bất kỳ bản sao cookie nào.",
+        "dependencies": ["TASK-002"],
+        "approach": "1. app/Services/Chat/Messenger/MessengerCookies.php: parse() nhận chuỗi; nếu bắt đầu '{' thì json_decode object string=>string, ngược lại tách ';' rồi '=' đầu tiên, trim; kiểm tên/giá trị theo BR-002; trùng tên lấy giá trị cuối; ném InvalidArgumentException message cố định. 2. MessengerLoginController::login(Request) theo technicalSolution mục 4 a-f, mẫu ZaloLoginController (unavailable() JSON no-store, rememberRiskAcknowledged + quyền mặc định từ IntegrationManager::definition). Lỗi validate cookies ném ValidationException::withMessages(['cookies' => ...]) (request là JSON nên trả 422, không flash). 3. routes/web.php: Route::post('messenger/login', ...)->middleware([AuthorizeResource::class.':integrations,update', 'throttle:5,10'])->name('messenger.login') trong nhóm integrations, trước {provider}. 4. bootstrap/app.php: thêm $exceptions->dontFlash(['cookies']). 5. Không đặt $cookies vào bất kỳ log/exception/context nào; biến chứa cookie unset sau khi gửi step.",
+        "test": "tests/Feature/Messenger/MessengerLoginTest.php (MỚI, Http::preventStrayRequests, Log::spy, cookie giả 'datr=FAKE-DATR; c_user=100000000000001; sb=FAKE-SB; xs=FAKE-XS-SECRET; extra=ZZZ'): thiếu tick -> 422, assertNothingSent (AC-001); rỗng / 9000 byte / 'abc' / thiếu xs / JSON thiếu c_user / giá trị chứa CRLF -> 422 trường cookies, assertNothingSent (AC-002); luồng thành công logins rỗng -> start -> cookies -> complete (AC-003), assertSent body step có datr,c_user,sb,xs và không có 'extra'; có login cũ -> request logout trước start; user_input/webauthn/client_http -> assertSent cancel 1 lần + 422 đúng chữ; display_and_wait mãi (Carbon::setTestNow tiến thời gian hoặc fake sequence) -> cancel + 422; fields bridge yêu cầu thêm 'fr' không có -> cancel + 422 'Thiếu cookie bắt buộc: fr'; step 4xx -> 422 cookie không được chấp nhận; 5xx -> 502; ConnectionException -> 503; thiếu env -> 503 assertNothingSent; Cache::lock('messenger-login') giữ sẵn -> 409; người không có integrations.update -> 403. AC-006 cho mọi ca: credentials null, Log::spy không có lời gọi nào chứa 'FAKE-XS-SECRET', response->getContent() không chứa 'FAKE-XS-SECRET' hay process id, session('_old_input') không có cookies, json_encode(Integration::query()->first()?->getAttributes()) không chứa 'FAKE-XS-SECRET'. Unit-style ca cho MessengerCookies::parse trong cùng file.",
+        "doneWhen": "Test pass thật; PHPStan sạch; php artisan route:list --name=messenger hiện route mới (chạy thật, không gọi mạng).",
+        "rollback": "Xoá controller, MessengerCookies, route, dòng dontFlash, test.",
+        "risks": "Shape bước/field id có thể khác (A6): parse phòng thủ, lỗi shape -> 502 chữ cố định chứ không lộ dữ liệu. Request đồng bộ tới 30-60 giây giữ một worker PHP (cần >=2 worker như Zalo, ghi vào runbook).",
+        "filesToChange": [
+          {
+            "path": "app/Services/Chat/Messenger/MessengerCookies.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "app/Http/Controllers/MessengerLoginController.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "routes/web.php",
+            "changes": "Thêm route POST integrations/messenger/login (name integrations.messenger.login) trước {provider}."
+          },
+          {
+            "path": "bootstrap/app.php",
+            "changes": "withExceptions thêm dontFlash(['cookies'])."
+          },
+          {
+            "path": "tests/Feature/Messenger/MessengerLoginTest.php",
+            "changes": "MỚI."
+          }
+        ],
+        "result": "php artisan test --filter=MessengerLoginTest pass (24 test, cookie giả không bao giờ chạm mạng/DB/log thật). Phát hiện và sửa một lỗi thật trong BridgeProvisioningClient khi viết test: logout/cancel trả 204 không có body JSON làm call() luôn ném MatrixException(502) dù thành công -> thêm tham số expectBody=false cho hai endpoint này. php artisan route:list --name=messenger hiện route messenger.login. composer run lint:check và phpstan (scope) sạch. AC-001..AC-006 đạt bằng Http::fake; shape Provisioning API thật vẫn chưa xác minh (A6).",
+        "filesActuallyChanged": [
+          "app/Services/Chat/Messenger/MessengerCookies.php",
+          "app/Http/Controllers/MessengerLoginController.php",
+          "routes/web.php",
+          "bootstrap/app.php",
+          "tests/Feature/Messenger/MessengerLoginTest.php",
+          "app/Services/Chat/Matrix/BridgeProvisioningClient.php"
+        ]
+      },
+      {
+        "id": "TASK-005",
+        "title": "Gửi tin: MessengerSender (ChatSender, txnId pm-{client_token}), đăng ký kênh messenger trong ChatChannels và registerChatRealtime",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "REQ-006/REQ-008; sai quy tắc gửi gây gửi đúp trên tài khoản cá nhân.",
+        "requirements": [
+          "REQ-006",
+          "REQ-008",
+          "BR-004",
+          "BR-006",
+          "BR-007",
+          "BR-009"
+        ],
+        "acceptanceCriteria": [
+          "AC-014",
+          "AC-015",
+          "AC-016",
+          "AC-017",
+          "AC-020"
+        ],
+        "inScope": "MessengerSender, ChatChannels (providers/sender/present), AppServiceProvider::registerChatRealtime, test sender + hồi quy /chat + realtime.",
+        "outOfScope": "Xử lý status event từ bridge (TASK-006); gửi media/reaction; UI.",
+        "dependencies": ["TASK-002"],
+        "approach": "1. app/Services/Chat/Messenger/MessengerSender.php implements ChatSender, copy cấu trúc ZaloSender (createOrFirst, claim UPDATE, settle) với ensureCanSend/deliver theo technicalSolution mục 6; txnId(ChatMessage): base 'pm-'.token an toàn hoặc base64url; nếu external_message_id khác null -> base.'-'.substr(sha1(id),0,8). 2. Khi sent: forceFill send_status sent, error null, external_message_id = event_id mới, sent_at now. 3. Auth failure -> MessengerChannel::markTokenInvalid + failed. 4. ChatChannels: inject MessengerSender, MessengerChannel; providers() thêm MessengerChannel::PROVIDER; sender() thêm nhánh; present() đổi $isZalo sang match theo provider, giữ nguyên giá trị cho telegram/zalo. 5. AppServiceProvider::registerChatRealtime: mảng provider thêm MessengerChannel::PROVIDER. 6. ChatController không cần đổi (đã chọn sender qua ChatChannels) - xác nhận bằng test POST /chat/{id}/messages.",
+        "test": "tests/Feature/Messenger/MessengerSenderTest.php (MỚI, Http::fake homeserver + provisioning logins CONNECTED): AC-014 (assertSent URL chứa '/send/m.room.message/pm-'.token và room được encode; double send 1 PUT); AC-015 (ConnectionException, 500, 502 -> unknown, Http::assertSentCount tính đúng 1 PUT; 403 -> failed; 401 M_UNKNOWN_TOKEN -> failed + Integration error); AC-016 (resend unknown cùng txnId; resend failed có external_message_id '$old:pm.local' -> txnId 'pm-{token}-'.substr(sha1('$old:pm.local'),0,8); claim lần 2 trả null); AC-017 (từng điều kiện chặn: không tạo ChatMessage, không PUT; rate limit 10 lần -> lần 11 chặn); client_token có ký tự '/' -> txnId base64url. Gửi qua HTTP: POST /chat/{conversation}/messages cho hội thoại messenger trả bản ghi sent. tests/Feature/Chat/ChatIndexChannelsTest.php (SỬA): thêm ca channels.messenger (AC-020) và khẳng định telegram/zalo không đổi, không khoá nào chứa token/login_id. tests/Feature/Chat/ChatRealtimeTest.php (SỬA): Integration messenger đổi status -> phát ChatChanged channel_status. Hồi quy: php artisan test --filter='ZaloSenderTest|TelegramSenderRegressionTest|ChatIndexChannelsTest|ChatRealtimeTest'.",
+        "doneWhen": "Test mới + hồi quy pass thật; PHPStan sạch.",
+        "rollback": "Revert ChatChannels.php, AppServiceProvider.php, 2 test chat; xoá MessengerSender và MessengerSenderTest.",
+        "risks": "Trùng lặp logic với ZaloSender (chấp nhận, như plan Zalo đã chọn). 'sent' chỉ nghĩa homeserver nhận; thất bại phía Meta chỉ phát hiện qua status event (A7). Thời gian homeserver giữ txnId không vô hạn (design 3.8) - resend rất muộn có thể gửi đúp.",
+        "filesToChange": [
+          {
+            "path": "app/Services/Chat/Messenger/MessengerSender.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "app/Services/Chat/ChatChannels.php",
+            "changes": "Thêm kênh messenger vào constructor, providers(), sender(), present()."
+          },
+          {
+            "path": "app/Providers/AppServiceProvider.php",
+            "changes": "registerChatRealtime: thêm MessengerChannel::PROVIDER vào danh sách provider."
+          },
+          {
+            "path": "tests/Feature/Messenger/MessengerSenderTest.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "tests/Feature/Chat/ChatIndexChannelsTest.php",
+            "changes": "Thêm ca channels.messenger."
+          },
+          {
+            "path": "tests/Feature/Chat/ChatRealtimeTest.php",
+            "changes": "Thêm ca Integration messenger phát channel_status."
+          }
+        ],
+        "result": "php artisan test --filter='MessengerSenderTest|ZaloSenderTest|TelegramSenderRegressionTest|ChatIndexChannelsTest|ChatRealtimeTest' pass (63 test). Khi viết test phát hiện và sửa 2 lỗi tự tạo trong lúc test: (1) Http::fake lặp cùng pattern trong một test không ghi đè được định nghĩa cũ (closure đầu đăng ký vẫn khớp trước) — tránh bằng cách tạo ChatMessage trực tiếp thay vì gọi send() thật ở các test resend; (2) fake trả cùng event_id cho nhiều lần gửi vi phạm unique (conversation_id, external_message_id) ở test rate-limit — sửa test dùng event_id tăng dần. composer run lint:check và phpstan (scope) sạch. AC-014..AC-017, AC-020 đạt bằng Http::fake; AC-018 (status event) kiểm ở TASK-006.",
+        "filesActuallyChanged": [
+          "app/Services/Chat/Messenger/MessengerSender.php",
+          "app/Services/Chat/ChatChannels.php",
+          "app/Providers/AppServiceProvider.php",
+          "tests/Feature/Messenger/MessengerSenderTest.php",
+          "tests/Feature/Chat/ChatIndexChannelsTest.php",
+          "tests/Feature/Chat/ChatRealtimeTest.php"
+        ]
+      },
+      {
+        "id": "TASK-006",
+        "title": "Đồng bộ: MessengerInbox + lệnh chat:matrix-sync {--once} + scheduler mỗi phút, lưu since ở settings",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "REQ-004/REQ-005: không có lệnh này thì không có hội thoại và tin nhận.",
+        "requirements": [
+          "REQ-004",
+          "REQ-005",
+          "REQ-010",
+          "REQ-006",
+          "BR-005",
+          "BR-006",
+          "BR-008",
+          "BR-009"
+        ],
+        "acceptanceCriteria": [
+          "AC-009",
+          "AC-010",
+          "AC-011",
+          "AC-012",
+          "AC-013",
+          "AC-018",
+          "AC-022"
+        ],
+        "inScope": "MessengerInbox (phân loại room, upsert Conversation, lưu tin in, status event), MatrixSyncCommand, dòng Schedule trong routes/console.php, fixture tự tạo, test.",
+        "outOfScope": "Daemon/supervisor/launchd; backfill lịch sử; tải media; read receipt/typing; nhóm (BR-006); appservice cho Laravel.",
+        "dependencies": ["TASK-002"],
+        "approach": "1. app/Services/Chat/Messenger/MessengerInbox.php: ingest(Integration, array syncResponse, bool initial): array{conversations:int, stored:int, failed:int}; hàm nội bộ classify(roomId, state, timeline), title(), body(), isIgnoredSender() theo technicalSolution mục 7 và BR-005/BR-006/A8; ghi theo mẫu ZaloInbox::ingest (createOrFirst, unread++, preview chỉ khi mới hơn, title không ghi đè bằng rỗng). Toàn bộ trong một DB::transaction do lệnh mở. 2. app/Console/Commands/MatrixSyncCommand.php: signature 'chat:matrix-sync {--once : Sync once with timeout 0 and exit}', mẫu TelegramPollCommand; invite -> join; ingest; Setting::set('chat.matrix.since') sau commit; kiểm login 5 phút; xử lý lỗi theo technicalSolution mục 7; output chỉ chữ cố định + số đếm. 3. routes/console.php: thêm Schedule::command('chat:matrix-sync --once')->everyMinute()->withoutOverlapping() kèm chú thích. 4. Fixture tests/Feature/Messenger/fixtures/sync-initial.json, sync-incremental.json, sync-invite.json (tự tạo theo shape Matrix CS /sync: next_batch, rooms.join.{room}.state.events/timeline.events, rooms.invite.{room}.invite_state.events; ghi chú trong test 'fixture tự tạo, chưa đối chiếu payload thật').",
+        "test": "tests/Feature/Messenger/MatrixSyncCommandTest.php (MỚI, Http::fake /sync theo fixture, Http::preventStrayRequests): AC-012 initial -> Conversation, 0 ChatMessage, room quản lý/nhóm bị bỏ, title fallback displayname; AC-009 incremental -> 1 tin in, unread 1, chạy lại cùng fixture (Setting since đặt lại) vẫn 1 tin; AC-010 từng loại sender/event bị bỏ, receive tắt -> 0 tin nhưng since = next_batch, không connected/thiếu env -> exit 0 và assertNothingSent; AC-011 since lưu và request sau gửi since=..., DB lỗi giả lập (ví dụ ChatMessage::creating ném exception) -> since giữ cũ, exit 1; AC-013 invite từ bot -> POST /join/%21room%3Apm.local, invite từ người lạ -> không join; AC-018 status event FAIL_PERMANENT -> tin out sent chuyển failed, SUCCESS không đổi; AC-022 media -> body 'Loại tin chưa hỗ trợ: ...'; M_UNKNOWN_TOKEN 401 -> Integration error; bridge_state_at cũ > 5 phút -> có request logins, mới -> không. Lịch: php artisan schedule:list (chạy thật, không mạng) hiện chat:matrix-sync --once mỗi phút.",
+        "doneWhen": "Test pass thật; PHPStan sạch; schedule:list có dòng mới.",
+        "rollback": "Bỏ dòng Schedule; xoá MatrixSyncCommand, MessengerInbox, fixture, test. Setting chat.matrix.since (nếu có do người dùng chạy thật) để nguyên.",
+        "risks": "Phân loại portal/nhóm/ghost dựa trên giả định A8; shape status event A7. --once timeout 0 nên độ trễ tối đa ~1 phút (A9). Lần sync đầu với nhiều room có thể lớn (chưa đo) - filter timeline limit 1 cho initial.",
+        "filesToChange": [
+          {
+            "path": "app/Services/Chat/Messenger/MessengerInbox.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "app/Console/Commands/MatrixSyncCommand.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "routes/console.php",
+            "changes": "Thêm Schedule chat:matrix-sync --once everyMinute withoutOverlapping."
+          },
+          {
+            "path": "tests/Feature/Messenger/fixtures/sync-initial.json",
+            "changes": "MỚI (fixture tự tạo)."
+          },
+          {
+            "path": "tests/Feature/Messenger/fixtures/sync-incremental.json",
+            "changes": "MỚI (fixture tự tạo)."
+          },
+          {
+            "path": "tests/Feature/Messenger/fixtures/sync-invite.json",
+            "changes": "MỚI (fixture tự tạo)."
+          },
+          {
+            "path": "tests/Feature/Messenger/MatrixSyncCommandTest.php",
+            "changes": "MỚI."
+          }
+        ],
+        "result": "php artisan test --filter=MatrixSyncCommandTest pass (11 test); php artisan schedule:list hiện dòng 'chat:matrix-sync --once' mỗi phút (chạy thật, không mạng). Phân loại room ban đầu dựa hoàn toàn vào membership trong CHÍNH batch đang xử lý nên một batch incremental không resend state đầy đủ sẽ không nhận diện lại được portal room đã biết -> sửa MessengerInbox::ingest để coi một external_chat_id đã có Conversation messenger là portal ngay (1 query whereIn, không N+1), chỉ classify bằng membership cho room thực sự mới; đồng thời bỏ điều kiện accepts() yêu cầu sender khớp đúng 'otherUserId' (không phải yêu cầu của BR-005, chỉ gây false-negative khi room đã biết). Cũng sửa một lỗi tự tạo trong fixture test: connected_at lệch múi giờ 2 tiếng so với epoch mốc fixture, làm sai assertion lọc tin trước khi đăng nhập. composer run lint:check và phpstan (scope) sạch. AC-009..AC-013, AC-018, AC-022 đạt bằng Http::fake + fixture tự tạo (A7, A8 trong design chưa xác minh với bridge thật).",
+        "filesActuallyChanged": [
+          "app/Services/Chat/Messenger/MessengerInbox.php",
+          "app/Console/Commands/MatrixSyncCommand.php",
+          "routes/console.php",
+          "tests/Feature/Messenger/fixtures/sync-initial.json",
+          "tests/Feature/Messenger/fixtures/sync-incremental.json",
+          "tests/Feature/Messenger/fixtures/sync-invite.json",
+          "tests/Feature/Messenger/MatrixSyncCommandTest.php"
+        ]
+      },
+      {
+        "id": "TASK-007",
+        "title": "Frontend: nhánh dán cookie cho login matrix_bridge ở /integrations/messenger và badge kênh Messenger trong /chat",
+        "status": "DONE",
+        "priority": "P1",
+        "priorityReason": "Cần để người dùng tự đăng nhập; backend đã kiểm mọi điều kiện nên UI chỉ là lớp thao tác.",
+        "requirements": ["REQ-001", "REQ-002", "REQ-007", "REQ-008"],
+        "acceptanceCriteria": ["AC-019", "AC-021"],
+        "inScope": "channel-badge.tsx, types/integration.ts, component messenger-cookie-login.tsx mới, nhánh trong pages/integrations/show.tsx; dùng component UI có sẵn (Input, Button, Checkbox, Alert/khối cảnh báo hiện có, InputError).",
+        "outOfScope": "Redesign trang; dialog nhiều bước; webview/extension lấy cookie; sửa tay resources/js/routes|actions; nút đồng bộ danh bạ cho Messenger; thay đổi /chat ngoài badge.",
+        "dependencies": ["TASK-004", "TASK-001"],
+        "approach": "1. channel-badge.tsx: thêm messenger: { letter: 'M', color: '#0084ff', name: 'Messenger' }. 2. types/integration.ts: login: 'qr' | 'oauth' | 'matrix_bridge' | null (cập nhật chú thích). 3. components/integrations/messenger-cookie-login.tsx: props {riskAcknowledged: boolean, connected: boolean, accountName: string | null, disabled: boolean, onLoggedIn: () => void}; state cookies (string), submitting, error; gọi route Wayfinder sinh từ integrations.messenger.login bằng `api.post` (mẫu zalo-qr-dialog.tsx, isAxiosError lấy message/errors.cookies|risk_acknowledged); Input type=password autoComplete='off' spellCheck false; nút 'Đăng nhập' disabled khi !riskAcknowledged hoặc rỗng hoặc đang gửi; luôn setCookies('') sau khi gửi (thành công hay lỗi); hiện 'Đã đăng nhập: <tên>' khi connected; không console.log. 4. show.tsx: const usesMatrixBridge = integration.login === 'matrix_bridge'; khi true hiện 4 câu cảnh báo riêng (design mục 6) cạnh cảnh báo unofficial sẵn có và component trên, truyền form.data.risk_acknowledged; onLoggedIn -> router.reload(). Nút Lưu kết nối/Kiểm tra/Ngắt kết nối giữ nguyên. 5. Sinh route Wayfinder bằng cơ chế sẵn có (vite plugin khi build/dev hoặc php artisan wayfinder:generate), không sửa tay. 6. Kiểm pages/chat/index.tsx và components/chat/* chỉ hard-code zalo ở nút đồng bộ danh bạ (giữ nguyên); banner/khoá composer dựa trên channels[provider] - nếu phát hiện chỗ hard-code chặn messenger thì báo lại, không tự mở rộng.",
+        "test": "pnpm run types:check, pnpm run check, pnpm run format:check (phạm vi file đổi), pnpm run build pass (chạy thật). Không có test UI tự động trong repo: AC-019 kiểm bằng review code + testcase thủ công trong runbook (Not Run).",
+        "doneWhen": "Các lệnh frontend pass thật; không any; không file generated sửa tay.",
+        "rollback": "Revert channel-badge.tsx, integration.ts, show.tsx; xoá messenger-cookie-login.tsx.",
+        "risks": "Request đăng nhập có thể kéo dài tới ~30-60 giây: UI phải hiện trạng thái đang gửi và không cho bấm lại (backend vẫn có lock 409).",
+        "filesToChange": [
+          {
+            "path": "resources/js/components/chat/channel-badge.tsx",
+            "changes": "Thêm entry messenger."
+          },
+          {
+            "path": "resources/js/types/integration.ts",
+            "changes": "IntegrationPage.login thêm 'matrix_bridge'."
+          },
+          {
+            "path": "resources/js/components/integrations/messenger-cookie-login.tsx",
+            "changes": "MỚI (thư mục components/integrations đã có)."
+          },
+          {
+            "path": "resources/js/pages/integrations/show.tsx",
+            "changes": "Nhánh usesMatrixBridge: cảnh báo riêng + component đăng nhập cookie."
+          }
+        ],
+        "result": "pnpm run build pass (build thật qua vite, wayfinder sinh resources/js/actions/.../MessengerLoginController.ts từ route mới). npx prettier --check trên 4 file đổi pass. pnpm run types:check và pnpm run check đang có lỗi/định dạng có sẵn trên diện rộng của repo (không liên quan tới các file vừa đổi — đã xác minh bằng cách đối chiếu danh sách file lỗi, không file nào thuộc TASK-007) do thiếu lịch sử git (`HEAD` chưa tồn tại) khiến format:check không chạy được và baseline type lỗi từ trước; coder không tự sửa các lỗi ngoài phạm vi này. AC-019 chỉ kiểm bằng review code (theo đúng doneWhen của task, không có test UI tự động); AC-021 đạt qua build + prettier.",
+        "filesActuallyChanged": [
+          "resources/js/components/chat/channel-badge.tsx",
+          "resources/js/types/integration.ts",
+          "resources/js/components/integrations/messenger-cookie-login.tsx",
+          "resources/js/pages/integrations/show.tsx"
+        ]
+      },
+      {
+        "id": "TASK-008",
+        "title": "Tài liệu: runbook người dùng tự dựng Synapse + mautrix-meta và testcase thủ công; cập nhật AGENT.md, docs/repo/index.json, docs/index.json",
+        "status": "DONE",
+        "priority": "P1",
+        "priorityReason": "REQ-009; quy ước AGENT.md bắt buộc đồng bộ tài liệu khi đổi code/cấu trúc.",
+        "requirements": ["REQ-009", "BR-010"],
+        "acceptanceCriteria": ["AC-025"],
+        "inScope": "Một file runbook mới (kèm bảng testcase thủ công Not Run), mục lục docs, AGENT.md (cây thư mục, mục Chat thêm 'Kênh Messenger', mục Tích hợp 14 kết nối + login matrix_bridge + active list).",
+        "outOfScope": "Docker compose, script cài đặt, unit systemd/launchd trong repo (chỉ ví dụ văn bản); agent chạy bất kỳ bước nào trong runbook; README thay đổi lớn.",
+        "dependencies": [
+          "TASK-003",
+          "TASK-004",
+          "TASK-005",
+          "TASK-006",
+          "TASK-007"
+        ],
+        "approach": "1. docs/repo/messenger-mautrix-runbook.md: đầu file khung cảnh báo 'Mọi bước dưới đây do NGƯỜI DÙNG tự làm trên máy của mình; agent/coder không chạy hộ, không dùng cookie thật.'; các mục: Yêu cầu (Docker, macOS arm64/Linux, tài khoản Facebook phụ, 2FA); 1) Synapse bằng Docker image matrixdotorg/synapse, publish 127.0.0.1:8008, server_name nội bộ (vd pm.local), tắt federation và enable_registration false (ghi 'đối chiếu tài liệu Synapse bản đang dùng'); 2) tạo user @pm:pm.local bằng register_new_matrix_user, lấy access token; 3) tải mautrix-meta bản ghim (kiểm sha256sums.txt), sinh config, các khoá cần sửa theo design mục 5.2 bước 3; 4) sinh registration.yaml, thêm vào app_service_config_files, restart Synapse; 5) chạy bridge, kiểm GET /_matrix/provision/v3/whoami?user_id=... trả 200; 6) điền .env (bảng biến), php artisan config:clear, chạy scheduler (php artisan schedule:work) và >=2 worker PHP; 7) vào /integrations/messenger, tick rủi ro, dán cookie tài khoản phụ; 8) bật active=true trong config khi đã test xong. Mục bảo mật/AGPL/log ngắn (design 4.2, 5.3, 5.4). Bảng testcase thủ công (Not Run): đăng nhập, cookie thiếu xs, 2FA/checkpoint, nhận tin 1-1, tin nhóm bị bỏ, tin tự gửi từ điện thoại bị bỏ, trả lời và kiểm trên điện thoại, mất mạng khi gửi -> unknown/gửi lại, restart bridge/Synapse không trùng tin, đăng xuất web -> BAD_CREDENTIALS, ngắt kết nối, grep log không có cookie/token. 2. docs/repo/index.json + docs/index.json: thêm entry (title, description, tags/url theo định dạng từng file). 3. AGENT.md: cây thư mục (Services/Chat/Matrix, Services/Chat/Messenger), mục 'Chat đa kênh' thêm tiểu mục 'Kênh Messenger (cookie, không chính thức)' mô tả trạng thái hiện tại + giới hạn; mục 'Tích hợp' đổi 13 -> 14, thêm login matrix_bridge, messenger active=false; mô tả facebook chỉ Fanpage; biến môi trường mới. 4. docs/plans/index.json đã có entry plan này (planner thêm) - không đổi.",
+        "test": "python3 -m json.tool docs/repo/index.json và docs/index.json hợp lệ (chạy thật); rà link tương đối trong runbook tồn tại; review nội dung đối chiếu AC-025.",
+        "doneWhen": "File tồn tại, JSON hợp lệ, AGENT.md phản ánh trạng thái code sau TASK-001..007.",
+        "rollback": "Xoá runbook; revert AGENT.md và 2 index.",
+        "risks": "Khoá cấu hình Synapse/mautrix-meta có thể đổi theo phiên bản: runbook ghi rõ phiên bản đã tham chiếu và nhắc đối chiếu tài liệu chính thức; không khẳng định đã chạy.",
+        "filesToChange": [
+          {
+            "path": "docs/repo/messenger-mautrix-runbook.md",
+            "changes": "MỚI."
+          },
+          {
+            "path": "docs/repo/index.json",
+            "changes": "Thêm entry runbook."
+          },
+          {
+            "path": "docs/index.json",
+            "changes": "Thêm entry runbook (và plan này nếu file đang liệt kê plan - hiện liệt kê các plan khác)."
+          },
+          {
+            "path": "AGENT.md",
+            "changes": "Cập nhật cây thư mục, mục Chat (kênh Messenger), mục Tích hợp."
+          }
+        ],
+        "result": "python3 -I -m json.tool trên docs/repo/index.json và docs/index.json hợp lệ (chạy thật). npx prettier --check trên runbook và AGENT.md pass. Không tự chạy bất kỳ bước nào trong runbook (đúng BR-010).",
+        "filesActuallyChanged": [
+          "docs/repo/messenger-mautrix-runbook.md",
+          "docs/repo/index.json",
+          "docs/index.json",
+          "AGENT.md"
+        ]
+      }
+    ],
+    "executionOrder": [
+      "TASK-001",
+      "TASK-002",
+      "TASK-003",
+      "TASK-004",
+      "TASK-005",
+      "TASK-006",
+      "TASK-007",
+      "TASK-008"
+    ],
+    "codingGroups": [
+      {
+        "name": "messenger-foundation",
+        "taskIds": ["TASK-001", "TASK-002", "TASK-003"],
+        "dependsOnGroups": []
+      },
+      {
+        "name": "messenger-login",
+        "taskIds": ["TASK-004"],
+        "dependsOnGroups": ["messenger-foundation"]
+      },
+      {
+        "name": "messenger-send",
+        "taskIds": ["TASK-005"],
+        "dependsOnGroups": ["messenger-foundation"]
+      },
+      {
+        "name": "messenger-sync",
+        "taskIds": ["TASK-006"],
+        "dependsOnGroups": ["messenger-foundation"]
+      },
+      {
+        "name": "messenger-frontend",
+        "taskIds": ["TASK-007"],
+        "dependsOnGroups": ["messenger-login"]
+      },
+      {
+        "name": "messenger-docs",
+        "taskIds": ["TASK-008"],
+        "dependsOnGroups": [
+          "messenger-login",
+          "messenger-send",
+          "messenger-sync",
+          "messenger-frontend"
+        ]
+      }
+    ],
+    "traceability": [
+      {
+        "requirement": "REQ-001",
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-002",
+          "AC-003",
+          "AC-004",
+          "AC-005"
+        ],
+        "tasks": ["TASK-002", "TASK-004", "TASK-007"],
+        "tests": "MessengerLoginTest; MatrixClientsTest; pnpm types:check/check/build; thủ công runbook TC đăng nhập (người dùng)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-002",
+        "acceptanceCriteria": ["AC-006"],
+        "tasks": ["TASK-004", "TASK-007"],
+        "tests": "MessengerLoginTest (Log::spy, response, session, DB không chứa cookie giả); review component xoá state",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-003",
+        "acceptanceCriteria": ["AC-007", "AC-008"],
+        "tasks": ["TASK-002", "TASK-003"],
+        "tests": "MessengerIntegrationTest; MessengerChannelTest; hồi quy QrLoginTest/FacebookTokenLoginTest/LinkedInOAuthTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-004",
+        "acceptanceCriteria": ["AC-009", "AC-010", "AC-011"],
+        "tasks": ["TASK-002", "TASK-006"],
+        "tests": "MatrixSyncCommandTest (fixture incremental, chạy lặp, since, rollback)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-005",
+        "acceptanceCriteria": ["AC-012", "AC-013"],
+        "tasks": ["TASK-006"],
+        "tests": "MatrixSyncCommandTest (fixture initial, invite)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-006",
+        "acceptanceCriteria": [
+          "AC-014",
+          "AC-015",
+          "AC-016",
+          "AC-017",
+          "AC-018"
+        ],
+        "tasks": ["TASK-002", "TASK-005", "TASK-006"],
+        "tests": "MessengerSenderTest; MatrixSyncCommandTest (status event); hồi quy ZaloSenderTest/TelegramSenderRegressionTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-007",
+        "acceptanceCriteria": ["AC-019", "AC-023"],
+        "tasks": ["TASK-001", "TASK-004", "TASK-007"],
+        "tests": "MessengerConfigTest (unofficial, 422 thiếu tick); MessengerLoginTest AC-001; review UI + thủ công",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-008",
+        "acceptanceCriteria": ["AC-020", "AC-021"],
+        "tasks": ["TASK-005", "TASK-007"],
+        "tests": "ChatIndexChannelsTest; ChatRealtimeTest; pnpm types:check/check/build",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-009",
+        "acceptanceCriteria": ["AC-025"],
+        "tasks": ["TASK-001", "TASK-008"],
+        "tests": "json.tool index hợp lệ; review runbook; .env.example có biến",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-010",
+        "acceptanceCriteria": ["AC-022"],
+        "tasks": ["TASK-006"],
+        "tests": "MatrixSyncCommandTest (fixture media)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-011",
+        "acceptanceCriteria": ["AC-023"],
+        "tasks": ["TASK-001"],
+        "tests": "MessengerConfigTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-012",
+        "acceptanceCriteria": ["AC-024"],
+        "tasks": ["TASK-001"],
+        "tests": "FacebookTokenLoginTest (đã sửa)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-001",
+        "acceptanceCriteria": ["AC-003", "AC-006", "AC-024"],
+        "tasks": ["TASK-001", "TASK-004"],
+        "tests": "MessengerLoginTest; FacebookTokenLoginTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-002",
+        "acceptanceCriteria": ["AC-001", "AC-002"],
+        "tasks": ["TASK-004"],
+        "tests": "MessengerLoginTest (assertNothingSent)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-003",
+        "acceptanceCriteria": ["AC-004"],
+        "tasks": ["TASK-004"],
+        "tests": "MessengerLoginTest (cancel 1 lần, chữ cố định)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-004",
+        "acceptanceCriteria": ["AC-014", "AC-015", "AC-016"],
+        "tasks": ["TASK-005"],
+        "tests": "MessengerSenderTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-005",
+        "acceptanceCriteria": ["AC-010"],
+        "tasks": ["TASK-006"],
+        "tests": "MatrixSyncCommandTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-006",
+        "acceptanceCriteria": ["AC-012", "AC-017"],
+        "tasks": ["TASK-005", "TASK-006"],
+        "tests": "MatrixSyncCommandTest (room nhóm bỏ); MessengerSenderTest (chặn group)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-007",
+        "acceptanceCriteria": ["AC-017", "AC-023"],
+        "tasks": ["TASK-001", "TASK-005"],
+        "tests": "MessengerSenderTest (proactive, rate limit, logins CONNECTED); MessengerConfigTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-008",
+        "acceptanceCriteria": ["AC-011", "AC-012"],
+        "tasks": ["TASK-006"],
+        "tests": "MatrixSyncCommandTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-009",
+        "acceptanceCriteria": ["AC-005", "AC-006", "AC-020"],
+        "tasks": ["TASK-002", "TASK-004", "TASK-005", "TASK-006"],
+        "tests": "MatrixClientsTest (message không chứa body); MessengerLoginTest; ChatIndexChannelsTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-010",
+        "acceptanceCriteria": ["AC-025"],
+        "tasks": ["TASK-002", "TASK-008"],
+        "tests": "Mọi test dùng Http::fake/preventStrayRequests; runbook ghi rõ người dùng tự làm",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-011",
+        "acceptanceCriteria": ["AC-008"],
+        "tasks": ["TASK-003"],
+        "tests": "MessengerIntegrationTest",
+        "result": "Not Run"
+      }
+    ],
+    "remainingRisks": [
+      "Tài khoản Facebook có thể bị checkpoint/khoá: chỉ dùng tài khoản phụ, bật 2FA; proactive tắt, rate limit, chỉ một login trên bridge.",
+      "Shape Provisioning API, /sync portal room, status event và ghost id (A6-A8) chưa xác minh bằng chạy thật; test chỉ chứng minh code đúng với fixture tự tạo. Kênh chưa được coi là chạy được cho tới khi người dùng chạy testcase thủ công.",
+      "'sent' chỉ nghĩa homeserver đã nhận; nếu bridge không phát status event (A7) thì thất bại phía Meta không hiện trong /chat.",
+      "Độ trễ nhận tin tới ~1 phút do scheduler --once (A9); cần process manager nếu muốn long-poll liên tục (ngoài phạm vi).",
+      "Request đăng nhập đồng bộ có thể chiếm một worker PHP tới 30-60 giây: cần >= 2 worker (như Zalo).",
+      "Portal room bị tái tạo (reset DB bridge) sinh hội thoại mới trùng tên (design QĐ6).",
+      "Phiên Meta nằm trong DB của bridge, ngoài cơ chế mã hoá Laravel: quyền file 600, ngoài repo, mã hoá đĩa (runbook).",
+      "Giá trị messenger_token cũ (nếu có) vẫn nằm trong integrations.credentials của facebook cho tới khi người dùng duyệt xoá riêng.",
+      "AGPL-3.0: không sửa, không phân phối binary bridge kèm app khi chưa có tư vấn; nhận định không phải tư vấn pháp lý.",
+      "Meta đổi giao thức làm bridge gãy: ghim phiên bản, theo dõi release, UI báo error chữ cố định."
+    ]
+  }
+}

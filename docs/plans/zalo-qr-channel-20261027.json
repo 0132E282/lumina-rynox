@@ -1,0 +1,1194 @@
+{
+  "title": "Kênh Zalo cá nhân thật: đăng nhập QR qua sidecar zca-js, nhận/gửi tin trong /chat",
+  "description": "Tham khảo khi triển khai kênh Zalo cá nhân: sidecar Node zalo-bridge (zca-js) chạy 127.0.0.1, đăng nhập bằng mã QR trên /integrations/zalo, lưu phiên mã hoá trong integrations.credentials, nhận tin qua webhook nội bộ ký HMAC và gửi tin từ khung /chat theo quy tắc như Telegram.",
+  "tags": [
+    "zalo",
+    "zca-js",
+    "qr-login",
+    "sidecar",
+    "chat",
+    "integrations",
+    "unofficial"
+  ],
+  "createdAt": "2026-10-27",
+  "content": {
+    "meta": {
+      "status": "PLANNED_NOT_IMPLEMENTED",
+      "goal": "Kênh Zalo cá nhân hoạt động thật: bấm \"Quét mã QR mới\" trên /integrations/zalo thì hiện mã QR, người dùng quét bằng điện thoại, hệ thống lưu phiên (mã hoá) và nhận/gửi tin Zalo trong khung /chat giống Telegram.",
+      "scope": "Sidecar Node mới zalo-bridge/ (zca-js), client + endpoint nội bộ Laravel, đăng nhập QR (backend + modal), nhận tin, gửi tin, khung /chat đa kênh (Telegram + Zalo), health check, bật active cho provider zalo, tài liệu và testcase. Không cần migration: dùng lại bảng integrations, conversations, chat_messages.",
+      "currentState": [
+        "config/integrations.php: provider zalo có active=false, unofficial=true, trường account + group_mode (mention_only|all|off), quyền receive/reply/proactive (proactive mặc định tắt); steps ghi \"Chưa có đăng nhập bằng mã QR\".",
+        "Không có nút \"Quét mã QR mới\" trong resources/js/pages/integrations/show.tsx; nút này chỉ có trong mockup docs/design/mockups/connect-zalo.html (cùng \"Kiểm tra kết nối\", \"Huỷ\", \"Ngắt kết nối\").",
+        "ConfiguredIntegrationProvider::connect() luôn đặt status=connected khi lưu form và array_merge credentials cũ với secret mới; disconnect() xoá credentials + meta. test() chỉ có chiến lược telegram.",
+        "Chat hiện chỉ Telegram: ChatController inject cứng TelegramChannel/TelegramSender, prop `channel` là một kênh duy nhất; ChannelBadge, InfoPanel, ConversationList, MessageThread ghi cứng chữ/màu Telegram.",
+        "TelegramSender: createOrFirst theo client_token, gửi một lần, ConnectionException/5xx -> unknown, lỗi rõ -> failed, resend claim bằng UPDATE nguyên tử; ChatController coi sending treo > 2 phút là unknown.",
+        "Bảng conversations: unique(provider, external_chat_id), type enum private|group; chat_messages: unique(conversation_id, external_message_id), unique(conversation_id, client_token). Đủ cho Zalo, không cần migration.",
+        "Repo chưa có thư mục tests/ (phpunit.xml trỏ tests/Unit, tests/Feature); composer.json dùng PHPUnit 12, không có Pest. Có database/factories/AdminFactory.php.",
+        "docs/index.json được AGENT.md nhắc nhưng không tồn tại; docs/repo/ chưa có.",
+        "Máy: Node v24.21.0, npm 11.19.0; không có supervisorctl, pm2. Root .gitignore chỉ bỏ /node_modules (zalo-bridge/node_modules sẽ bị track nếu không thêm). vite.config.ts lint quét cả repo trừ ignorePatterns.",
+        "npm registry (npm view, 2026-10-27): zca-js 2.2.0, license MIT, type module (ESM), types ./dist/index.d.ts, engines node >=18, deps ws, pako, semver, crypto-js, form-data, spark-md5, json-bigint, tough-cookie. Chưa tải gói, chưa đọc .d.ts."
+      ],
+      "sources": [
+        "Yêu cầu người dùng (tin nhắn giao việc 2026-10-27)",
+        "AGENT.md",
+        "docs/plans/roadmap-nativephp-modules-20261027.json (M5, D2, D11, D12, D14)",
+        "docs/plans/personal-channels-20261027.json (pattern bridge: secret, timeout -> unknown, nhóm cần mention)",
+        "docs/design/multi-channel-chat-ui.md (luồng session_lost, badge Zalo #0068FF, rate-limit, mention)",
+        "docs/design/mockups/connect-zalo.html",
+        "config/integrations.php, app/Services/Integrations/*, app/Services/Chat/Telegram/*, app/Console/Commands/TelegramPollCommand.php, app/Http/Controllers/{ChatController,IntegrationController}.php, app/Models/{Conversation,ChatMessage,Integration}.php, resources/js/pages/chat/index.tsx, resources/js/components/chat/*, resources/js/pages/integrations/show.tsx, resources/js/types/{chat,integration}.ts, bootstrap/app.php, routes/web.php"
+      ],
+      "outOfScope": [
+        "Tin đa phương tiện (ảnh, file, sticker, voice) khi gửi; khi nhận chỉ lưu nhãn \"Loại tin chưa hỗ trợ: <loại>\"",
+        "Bot/AI tự trả lời, gửi hàng loạt, tạo hội thoại mới từ UI",
+        "Nhiều tài khoản Zalo cùng lúc (integrations.provider là unique)",
+        "WhatsApp/Instagram/Messenger cá nhân, lõi bridge dùng chung (plan personal-channels)",
+        "Bộ lọc kênh/chip \"Mất phiên\"/\"Cần xử lý\" và panel AI trong /chat (multi-channel-chat-ui.md) ngoài phần tối thiểu để hiện đúng kênh",
+        "Cài supervisor/pm2/launchd, deploy, commit/push, chạy migration trên DB thật"
+      ]
+    },
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "title": "Đăng nhập Zalo bằng mã QR",
+        "description": "Trên /integrations/zalo có nút \"Quét mã QR mới\"; bấm thì mở modal hiển thị ảnh QR do sidecar trả (base64), tự hỏi trạng thái khoảng 2 giây/lần qua route Laravel, hiển thị trạng thái chờ quét / đã quét chờ xác nhận / hết hạn / bị từ chối / lỗi / đã đăng nhập.",
+        "source": "Yêu cầu người dùng; mockup connect-zalo.html"
+      },
+      {
+        "id": "REQ-002",
+        "title": "Lưu và khôi phục phiên",
+        "description": "Phiên (cookie, imei, userAgent) lưu vào integrations.credentials (cast encrypted:array). Sidecar không ghi phiên ra đĩa; khi khởi động lại sidecar tự xin phiên từ Laravel qua endpoint nội bộ và đăng nhập lại không cần quét QR.",
+        "source": "Yêu cầu người dùng"
+      },
+      {
+        "id": "REQ-003",
+        "title": "Sidecar zalo-bridge",
+        "description": "Thư mục mới zalo-bridge/ với package.json riêng, chạy dài hạn, chỉ bind 127.0.0.1, nhận lệnh HTTP có ký HMAC: health, bắt đầu/hỏi trạng thái/huỷ QR, gửi tin, đăng xuất.",
+        "source": "Yêu cầu người dùng"
+      },
+      {
+        "id": "REQ-004",
+        "title": "Nhận tin Zalo vào /chat",
+        "description": "Listener zca-js đẩy tin đến về Laravel qua POST /internal/zalo/inbound (ký HMAC, không session/CSRF, có throttle). Laravel lưu Conversation (provider zalo, external_chat_id = threadId, type private|group) và ChatMessage (khử trùng theo message id).",
+        "source": "Yêu cầu người dùng; pattern TelegramInbox"
+      },
+      {
+        "id": "REQ-005",
+        "title": "Gửi tin Zalo từ /chat",
+        "description": "Nhân viên trả lời hội thoại Zalo trong /chat; Laravel gọi sidecar /send; quy tắc như Telegram: một lần, timeout -> unknown, không tự retry, resend claim nguyên tử, client_token chống gửi đúp.",
+        "source": "Yêu cầu người dùng; TelegramSender"
+      },
+      {
+        "id": "REQ-006",
+        "title": "Khung /chat đa kênh tối thiểu",
+        "description": "Danh sách hội thoại hiện cả Telegram và Zalo với huy hiệu đúng kênh; banner mất kết nối, khoá composer, nhãn kênh, panel thông tin và nút Kết nối lại dựa trên kênh của hội thoại đang mở. Hành vi Telegram giữ nguyên.",
+        "source": "Yêu cầu người dùng; multi-channel-chat-ui.md"
+      },
+      {
+        "id": "REQ-007",
+        "title": "Trạng thái và health của kênh",
+        "description": "Trang /integrations/zalo hiện \"Bridge đang chạy\" / \"Bridge không chạy\" và trạng thái phiên; nút \"Kiểm tra kết nối\" chạy kiểm tra thật qua sidecar; provider zalo chuyển active=true khi kênh chạy thật.",
+        "source": "Yêu cầu người dùng; mockup connect-zalo.html"
+      },
+      {
+        "id": "REQ-008",
+        "title": "Vận hành sidecar",
+        "description": "Khởi chạy bằng `npm --prefix zalo-bridge start` (hoặc supervisor do người dùng tự cài). Listener đóng bất thường thì reconnect có backoff; quá số lần hoặc mất phiên thì báo Laravel đánh dấu lỗi.",
+        "source": "Yêu cầu người dùng"
+      },
+      {
+        "id": "REQ-009",
+        "title": "Ngắt kết nối Zalo",
+        "description": "\"Ngắt kết nối\" xoá credentials (luồng hiện có) và yêu cầu sidecar dừng listener, bỏ phiên trong bộ nhớ.",
+        "source": "Suy ra từ REQ-002 + IntegrationController::destroy hiện có"
+      }
+    ],
+    "businessRules": [
+      {
+        "id": "BR-001",
+        "rule": "Cảnh báo ToS đỏ giữ nguyên; phải tick \"Tôi hiểu rủi ro\" trước khi bắt đầu QR. Server kiểm tra (422 nếu thiếu) và lưu settings.risk_acknowledged.",
+        "source": "Yêu cầu người dùng; UpdateIntegrationRequest hiện có"
+      },
+      {
+        "id": "BR-002",
+        "rule": "Không log, không trả client: cookie, imei, userAgent, ảnh/nội dung QR, nội dung tin nhắn trong log. Credentials chỉ ở server (hidden + encrypted). Ảnh QR chỉ trả cho người có integrations.update, kèm Cache-Control: no-store.",
+        "source": "Yêu cầu người dùng; Integration::$hidden"
+      },
+      {
+        "id": "BR-003",
+        "rule": "Gửi đúng một lần mỗi thao tác: timeout/ConnectionException/5xx từ sidecar -> unknown (\"Chưa chắc chắn\"), lỗi chắc chắn chưa gửi (4xx từ sidecar) -> failed; không tự retry; resend chỉ chiếm tin unknown|failed bằng một UPDATE nguyên tử.",
+        "source": "Yêu cầu người dùng; TelegramSender"
+      },
+      {
+        "id": "BR-004",
+        "rule": "Quyền kết nối: receive tắt -> không lưu tin đến; reply tắt -> khoá composer và chặn gửi; proactive (mặc định tắt) -> chỉ được gửi vào hội thoại đã có ít nhất một tin đến; không có UI tạo hội thoại mới.",
+        "source": "config/integrations.php (zalo.permissions); diễn giải proactive là đề xuất, xem câu hỏi mở"
+      },
+      {
+        "id": "BR-005",
+        "rule": "Chế độ nhóm (đề xuất, cần chốt): off -> không lưu tin nhóm và chặn gửi vào nhóm; mention_only -> chỉ lưu tin nhóm có mention tài khoản mình, được trả lời trong nhóm; all -> lưu mọi tin nhóm. Mặc định là giá trị đầu (mention_only) như IntegrationManager::present().",
+        "source": "config/integrations.php (group_mode); personal-channels BR \"nhóm cần mention\""
+      },
+      {
+        "id": "BR-006",
+        "rule": "Giới hạn tốc độ gửi (đề xuất, cần chốt số): tối đa 10 tin/phút cho tài khoản Zalo, sidecar gửi tuần tự cách nhau tối thiểu 2 giây. Vượt giới hạn thì không tạo tin, báo \"Đang giới hạn tốc độ gửi để bảo vệ tài khoản\".",
+        "source": "Yêu cầu người dùng; multi-channel-chat-ui.md (rate-limit)"
+      },
+      {
+        "id": "BR-007",
+        "rule": "Tin isSelf (chính chủ gửi từ điện thoại/thiết bị khác) đợt đầu không lưu (đề xuất, cần chốt) để tránh trùng với tin vừa gửi từ hệ thống.",
+        "source": "Đề xuất của planner"
+      },
+      {
+        "id": "BR-008",
+        "rule": "Chỉ một phiên QR đang chờ tại một thời điểm (bắt đầu phiên mới huỷ phiên cũ); một listener cho tài khoản. Khi listener bị đóng vì Zalo Web mở ở nơi khác thì không tự reconnect lặp, đánh dấu lỗi để người dùng chủ động kết nối lại.",
+        "source": "Yêu cầu người dùng (giới hạn zca-js)"
+      },
+      {
+        "id": "BR-009",
+        "rule": "Sidecar chỉ bind 127.0.0.1. Mọi request hai chiều Laravel <-> sidecar ký HMAC-SHA256 bằng ZALO_BRIDGE_SECRET trên chuỗi `timestamp.METHOD.path.body`, timestamp lệch tối đa 300 giây, so sánh hằng thời gian (hash_equals / crypto.timingSafeEqual). Endpoint /internal/zalo/* nằm ngoài nhóm web (không session/CSRF/cookie), chỉ nhận IP loopback, có throttle.",
+        "source": "Yêu cầu người dùng; planner tinh chỉnh từ shared secret sang HMAC hai chiều"
+      }
+    ],
+    "acceptanceCriteria": [
+      {
+        "id": "AC-001",
+        "requirement": "REQ-001",
+        "criterion": "Đã tick rủi ro, bấm \"Quét mã QR mới\": modal mở, hiện ảnh QR từ sidecar; request trạng thái gửi khoảng 2 giây/lần; nhãn trạng thái tiếng Việt cho waiting/scanned/expired/declined/error."
+      },
+      {
+        "id": "AC-002",
+        "requirement": "REQ-001",
+        "criterion": "Khi trạng thái logged_in: modal tự đóng, dừng poll, toast \"Đã kết nối Zalo\", trang tải lại thấy trạng thái \"Đã kết nối\" và tên tài khoản Zalo."
+      },
+      {
+        "id": "AC-003",
+        "requirement": "REQ-001",
+        "criterion": "expired/declined/error: hiện thông báo và nút \"Tạo mã mới\"; đóng modal khi chưa xong thì gọi huỷ phiên QR; không còn poll sau khi đóng."
+      },
+      {
+        "id": "AC-004",
+        "requirement": "BR-001",
+        "criterion": "Chưa tick \"Tôi hiểu rủi ro\": nút QR bị vô hiệu; POST /integrations/zalo/qr không có risk_acknowledged trả 422 và không gọi sidecar. Cảnh báo ToS đỏ vẫn hiển thị."
+      },
+      {
+        "id": "AC-005",
+        "requirement": "REQ-002",
+        "criterion": "Sau đăng nhập: credentials giải mã có cookie, imei, user_agent; cột integrations.credentials thô không chứa các giá trị đó dạng rõ; thư mục zalo-bridge/ không có file phiên; props Inertia và JSON QR không chứa credentials."
+      },
+      {
+        "id": "AC-006",
+        "requirement": "REQ-002",
+        "criterion": "Dừng rồi chạy lại sidecar khi đã có phiên: sidecar xin phiên qua GET /internal/zalo/session, đăng nhập lại, health báo running, không cần quét QR."
+      },
+      {
+        "id": "AC-007",
+        "requirement": "BR-009",
+        "criterion": "Request tới /internal/zalo/* thiếu chữ ký, chữ ký sai, timestamp lệch quá 300 giây hoặc IP không phải loopback: 401/403, không ghi DB. Request tới sidecar thiếu/sai chữ ký: 401."
+      },
+      {
+        "id": "AC-008",
+        "requirement": "REQ-004",
+        "criterion": "Tin đến hợp lệ tạo Conversation (provider zalo, external_chat_id = thread_id, type private|group) và ChatMessage direction in; gửi lại cùng message_id không tạo dòng mới, unread_count không tăng. Tin không phải text lưu \"Loại tin chưa hỗ trợ: <loại>\"."
+      },
+      {
+        "id": "AC-009",
+        "requirement": "BR-004, BR-005, BR-007",
+        "criterion": "receive tắt: không lưu tin. group_mode off: không lưu tin nhóm; mention_only: chỉ lưu tin nhóm có mentions_self=true; all: lưu mọi tin nhóm. is_self=true: không lưu. Endpoint vẫn trả 200 với stored=false để sidecar không gửi lại."
+      },
+      {
+        "id": "AC-010",
+        "requirement": "REQ-005, BR-003",
+        "criterion": "Gửi từ /chat: sidecar 200 -> sent + external_message_id; timeout/ConnectionException/5xx -> unknown; 4xx -> failed; mỗi thao tác đúng 1 request tới sidecar (Http::assertSentCount); resend bấm đúp chỉ 1 request; client_token lặp không gửi lần hai."
+      },
+      {
+        "id": "AC-011",
+        "requirement": "BR-006, BR-004",
+        "criterion": "Vượt giới hạn tốc độ: không tạo ChatMessage, không gọi sidecar, composer báo lỗi. reply tắt hoặc nhóm khi group_mode off hoặc hội thoại chưa có tin đến khi proactive tắt: bị chặn với thông báo rõ."
+      },
+      {
+        "id": "AC-012",
+        "requirement": "REQ-006",
+        "criterion": "/chat hiển thị hội thoại Telegram và Zalo trong cùng danh sách với huy hiệu T (#229ed9) hoặc Z (#0068ff) và sr-only tên kênh; banner/khoá composer/nút Kết nối lại theo kênh của hội thoại đang mở (link /integrations/zalo cho Zalo); luồng Telegram cũ không đổi."
+      },
+      {
+        "id": "AC-013",
+        "requirement": "REQ-007",
+        "criterion": "Trang /integrations/zalo hiện \"Bridge đang chạy\" kèm trạng thái phiên hoặc \"Bridge không chạy\" (prop deferred, health timeout ngắn, trang không chờ health). \"Kiểm tra kết nối\" trả passed khi sidecar running và đã đăng nhập, failed với thông báo cố định khi không."
+      },
+      {
+        "id": "AC-014",
+        "requirement": "REQ-008, BR-008",
+        "criterion": "Listener đóng bất thường: reconnect với backoff 5s, 15s, 30s, 60s, 120s (tối đa 5 lần) rồi báo trạng thái lỗi; đóng do Zalo Web nơi khác: báo lỗi ngay \"Zalo Web đang mở ở nơi khác\", không reconnect; mất phiên: Laravel đặt status=error + last_error, /chat hiện banner và khoá composer."
+      },
+      {
+        "id": "AC-015",
+        "requirement": "REQ-009",
+        "criterion": "Ngắt kết nối: credentials null, status disconnected, sidecar nhận /logout (nếu đang chạy; sidecar không chạy thì vẫn ngắt thành công); webhook đến sau đó trả stored=false, không lưu."
+      },
+      {
+        "id": "AC-016",
+        "requirement": "BR-002",
+        "criterion": "Log Laravel và stdout/stderr sidecar trong các test không chứa cookie, imei, user agent, chuỗi base64 QR hay nội dung tin; logger sidecar che các khoá nhạy cảm."
+      },
+      {
+        "id": "AC-017",
+        "requirement": "REQ-007",
+        "criterion": "config zalo active=true; trang tổng quan và chi tiết hiện trạng thái thật (Chưa kết nối khi chưa quét QR; không còn \"Đã lưu cấu hình\" và ghi chú \"Kênh này chưa hoạt động\" cho Zalo); lưu form khi chưa có phiên không đặt status=connected."
+      },
+      {
+        "id": "AC-018",
+        "requirement": "REQ-003",
+        "criterion": "Sidecar chỉ lắng nghe 127.0.0.1:<ZALO_BRIDGE_PORT>; thiếu ZALO_BRIDGE_SECRET thì sidecar thoát với thông báo rõ, không chạy không xác thực."
+      }
+    ],
+    "assumptions": [
+      "ĐÃ XÁC MINH (TASK-001, 2026-10-27, đọc .d.ts và dist JS của zca-js@2.2.0 đã cài): chữ ký loginQR + sự kiện QR, login bằng credentials, lấy credentials qua callback GotLoginInfo, sự kiện listener, cấu trúc Message, kết quả/lỗi sendMessage. Chi tiết và phần CHƯA xác minh: content.spikeResult. Còn chưa xác minh: mã msgType media, ý nghĩa error_code, mã đóng thực tế khi Zalo Web nơi khác chiếm (suy luận CloseReason.DuplicateConnection=3000).",
+      "App chạy tự host (D14, chưa duyệt chính thức), Laravel và sidecar cùng máy; sidecar gọi Laravel qua ZALO_BRIDGE_CALLBACK_URL (mặc định http://127.0.0.1:8000, ghi literal vì `node --env-file` không nội suy ${APP_URL}).",
+      "Laravel chạy với nhiều worker (php-fpm, hoặc artisan serve với PHP_CLI_SERVER_WORKERS >= 2). Với 1 worker, request Laravel đang chờ sidecar và callback sidecar -> Laravel có thể chặn nhau.",
+      "Sidecar đọc chung file .env của Laravel bằng `node --env-file=../.env` (Node 24 hỗ trợ); không thêm gói dotenv.",
+      "Giới hạn độ dài tin dùng chung ChatMessage::MAX_BODY_LENGTH (4096) cho tới khi spike xác nhận giới hạn của Zalo.",
+      "Một tài khoản Zalo duy nhất (integrations.provider unique).",
+      "Kiểm thử PHP bằng PHPUnit 12 (composer.json không có Pest); kiểm thử sidecar bằng node:test có sẵn của Node 24, không thêm framework test.",
+      "Không cần migration: provider là string, type enum private|group khớp User|Group của Zalo, meta JSON chứa trạng thái bridge và tài khoản.",
+      "Endpoint HTTP của sidecar viết bằng node:http, không thêm express, để dependency chỉ còn zca-js."
+    ],
+    "openQuestions": [
+      {
+        "question": "Cho phép cài zca-js@2.2.0 (pin chính xác) vào zalo-bridge/package.json và tạo zalo-bridge/package-lock.json không? (D12 đã duyệt zca-js ở M5 nhưng mỗi lần cài vẫn cần bạn đồng ý.)",
+        "proposal": "Đồng ý cài đúng 2.2.0, chạy `npm audit` của gói trong zalo-bridge trước khi dùng, không đụng package.json/pnpm-lock.yaml gốc."
+      },
+      {
+        "question": "Chạy sidecar thế nào khi dùng hằng ngày: tự chạy `npm --prefix zalo-bridge start` trong terminal, hay cần thêm cách chạy nền (launchd trên macOS, supervisor)?",
+        "proposal": "Đợt này chỉ có npm script start và hướng dẫn trong AGENT.md; cấu hình chạy nền để sau khi bạn chọn công cụ (máy chưa có supervisor/pm2)."
+      },
+      {
+        "question": "Có nhận tin nhóm không, và \"Chế độ nhóm\" nghĩa là gì khi chưa có bot (người trả lời tay)?",
+        "proposal": "Theo BR-005: off = bỏ tin nhóm và chặn gửi vào nhóm; mention_only (mặc định) = chỉ lưu tin nhóm có mention bạn; all = lưu mọi tin nhóm."
+      },
+      {
+        "question": "Tin bạn tự gửi từ điện thoại (isSelf) có cần hiện trong /chat không?",
+        "proposal": "Đợt đầu không lưu (BR-007) để tránh trùng với tin gửi từ hệ thống; làm sau nếu cần, có xử lý khử trùng theo msgId."
+      },
+      {
+        "question": "Ngưỡng giới hạn tốc độ gửi là bao nhiêu?",
+        "proposal": "10 tin/phút cho cả tài khoản, sidecar gửi tuần tự cách nhau tối thiểu 2 giây; đặt trong config/services.php để chỉnh không cần sửa code."
+      },
+      {
+        "question": "Cổng sidecar?",
+        "proposal": "ZALO_BRIDGE_PORT=3790, chỉ 127.0.0.1."
+      },
+      {
+        "question": "Repo chưa có thư mục tests/. Có đồng ý tạo tests/TestCase.php và tests/{Unit,Feature}/Zalo/* để chạy `php artisan test` không?",
+        "proposal": "Đồng ý; TestCase tối thiểu kế thừa Illuminate\\Foundation\\Testing\\TestCase, dùng RefreshDatabase trên SQLite :memory: như phpunit.xml."
+      },
+      {
+        "question": "Khi sidecar không chạy mà bấm Gửi: báo lỗi ngay (không tạo tin) hay tạo tin rồi để unknown?",
+        "proposal": "ensureCanSend gọi /health với connect timeout 1 giây; không chạy thì ChatUnavailableException \"Zalo bridge không chạy\", không tạo tin. Lỗi kết nối trong lúc gửi thật vẫn là unknown."
+      },
+      {
+        "question": "docs/index.json không tồn tại dù AGENT.md nhắc. Tạo mới ở task tài liệu không?",
+        "proposal": "Tạo mới với các mục docs hiện có + testcase Zalo; nếu bạn muốn giữ nguyên thì chỉ cập nhật docs/plans/index.json và AGENT.md."
+      },
+      {
+        "question": "Khi listener bị Zalo Web nơi khác chiếm, chấp nhận không tự reconnect (phải bấm Kết nối lại/khởi động lại) không?",
+        "proposal": "Chấp nhận; tự reconnect sẽ đá phiên Zalo Web của bạn qua lại. Để chạy lại: bấm \"Quét mã QR mới\" hoặc khởi động lại sidecar (sidecar sẽ thử đăng nhập lại bằng phiên đã lưu). Không thêm nút mới."
+      }
+    ],
+    "blockers": [
+      "B1/B2: ĐÃ GỠ ngày 2026-10-27 (người dùng duyệt cài zca-js@2.2.0; spike TASK-001 xong, xem content.spikeResult).",
+      "B3: Kiểm thử đầu-cuối cần tài khoản Zalo thật và bạn quét QR bằng điện thoại: không tự động hoá được, chỉ ghi testcase trạng thái Not Run."
+    ],
+    "technicalSolution": "1. KIẾN TRÚC\nTrình duyệt -> Laravel (web, auth, integrations.update / conversations.reply) -> ZaloBridgeClient (Http, ký HMAC) -> sidecar zalo-bridge (node:http, 127.0.0.1:ZALO_BRIDGE_PORT) -> zca-js -> Zalo.\nSidecar -> Laravel: LaravelClient (fetch, ký HMAC) -> /internal/zalo/* (ngoài nhóm web) -> ZaloBridgeController -> ZaloInbox / Integration.\nKhông thêm bảng. Integration provider 'zalo': credentials = {cookie: string JSON, imei: string, user_agent: string} (encrypted:array); meta = {zalo_account: {uid, name}, bridge_state: string, bridge_state_at: ISO}; settings giữ nguyên dạng fields/permissions/risk_acknowledged.\n\n2. HỢP ĐỒNG KÝ (cả hai chiều, BR-009)\nHeader X-Bridge-Timestamp (giây Unix) và X-Bridge-Signature = hex(HMAC-SHA256(ZALO_BRIDGE_SECRET, \"{ts}.{METHOD}.{path}.{rawBody}\")); path gồm query string; body rỗng là chuỗi rỗng. Bên nhận từ chối nếu |now - ts| > 300 hoặc chữ ký sai (hash_equals / crypto.timingSafeEqual sau khi so độ dài). PHP: App\\Services\\Chat\\Zalo\\BridgeSignature; Node: zalo-bridge/src/signature.mjs; cùng vector test cố định ở cả hai bộ test để đảm bảo khớp.\n\n3. API SIDECAR (Laravel -> sidecar, JSON, tất cả yêu cầu chữ ký)\nGET  /health -> 200 {state: idle|qr_pending|connecting|running|reconnecting|session_lost|displaced|stopped, account: {uid, name}|null, version}\nPOST /qr/start -> 200 {login_id}; huỷ phiên QR cũ nếu có (BR-008). 409 nếu đang running (phải /logout trước) - Laravel gọi /logout trước khi start khi người dùng quét lại.\nGET  /qr/status?login_id= -> 200 {state: waiting|scanned|expired|declined|logged_in|error, image: 'data:image/png;base64,...'|null (chỉ khi waiting), error_code: string|null}; 404 login_id lạ.\nPOST /qr/cancel {login_id} -> 204\nPOST /send {thread_id, thread_type: user|group, text} -> 200 {message_id: string|null}; 409 {code: not_logged_in}; 422 {code: invalid|rejected} (Zalo từ chối rõ ràng, chắc chắn chưa gửi); 502 {code: ambiguous} (lỗi mạng/không rõ). Sidecar gửi tuần tự qua hàng đợi, cách nhau tối thiểu ZALO_BRIDGE_SEND_GAP_MS (2000).\nPOST /logout -> 204: dừng listener, xoá phiên trong bộ nhớ, state=stopped.\n\n4. API NỘI BỘ LARAVEL (sidecar -> Laravel, routes/internal.php, prefix internal/zalo, middleware VerifyZaloBridgeSignature + throttle:600,1, không session/CSRF/cookie, chỉ IP loopback)\nPOST /internal/zalo/session {credentials: {cookie, imei, user_agent}, account: {uid, name}} -> 204: lưu credentials, status=connected, last_error=null, last_checked_at=now, meta.zalo_account, settings giữ nguyên. 409 nếu Integration chưa có risk_acknowledged.\nGET  /internal/zalo/session -> 200 {credentials} khi có credentials và status != disconnected; 404 nếu không. Không bao giờ log body.\nPOST /internal/zalo/status {state, reason_code|null} -> 204: ghi meta.bridge_state; session_lost/displaced/reconnect_exhausted -> status=error + last_error là câu tiếng Việt cố định theo reason_code (không dùng text lỗi thô); running -> status=connected, last_error=null (chỉ khi có credentials).\nPOST /internal/zalo/inbound {message_id, thread_id, thread_type: user|group, thread_name|null, sender_id, sender_name|null, is_self, content_type: text|image|sticker|file|voice|video|link|other, text|null, mentions_self: bool, sent_at_ms} -> 200 {stored: bool}. Lỗi validate -> 422 (sidecar không gửi lại); 5xx/timeout -> sidecar giữ trong hàng đợi bộ nhớ (tối đa 500 tin, backoff) và gửi lại; an toàn vì khử trùng theo (conversation_id, external_message_id).\n\n5. LUỒNG ĐĂNG NHẬP QR\nshow.tsx: nút \"Quét mã QR mới\" (khi definition login='qr'), vô hiệu khi chưa tick rủi ro -> POST /integrations/zalo/qr {risk_acknowledged:true} -> ZaloLoginController::start: validate accepted, lưu settings.risk_acknowledged (tạo Integration nếu chưa có, status giữ nguyên), gọi /logout nếu health running, gọi /qr/start, trả {login_id}. Modal (resources/js/components/integrations/zalo-qr-dialog.tsx) poll GET /integrations/zalo/qr?login_id= mỗi 2000ms (setTimeout nối tiếp; không tạm dừng khi tab ẩn vì người dùng đang cầm điện thoại; chỉ dừng khi đóng modal hoặc trạng thái kết thúc). logged_in -> đóng modal, router.reload, toast. expired/declined/error -> nút \"Tạo mã mới\". Đóng modal giữa chừng -> DELETE /integrations/zalo/qr. Phản hồi QR có Cache-Control: no-store; không log image.\nTrong sidecar: trạng thái phiên QR lưu trong bộ nhớ theo login_id; khi zca-js báo đăng nhập xong: lấy cookie/imei/userAgent (cách lấy theo spike), POST /internal/zalo/session; thành công -> state logged_in và khởi động listener; Laravel lỗi -> state error (error_code save_failed), không giữ phiên.\n\n6. LUỒNG KHỞI ĐỘNG / RECONNECT (REQ-002, REQ-008)\nSidecar start -> kiểm tra env (thiếu ZALO_BRIDGE_SECRET thì exit 1) -> listen 127.0.0.1 -> GET /internal/zalo/session -> có credentials: login bằng credentials, start listener, POST status running; đăng nhập thất bại do phiên hết hạn -> POST status session_lost. Laravel chưa chạy -> thử lại 5s, 15s, 30s, 60s rồi giữ chu kỳ 60s.\nListener đóng: nếu mã đóng là 'mở Zalo Web nơi khác' (xác định ở spike) -> state displaced, POST status displaced, không reconnect. Ngược lại reconnect backoff 5s, 15s, 30s, 60s, 120s (tối đa 5 lần, state reconnecting) rồi POST status reconnect_exhausted. Thành công -> POST status running.\n\n7. NHẬN TIN (REQ-004)\nzca-js message -> normalize.mjs ánh xạ sang hợp đồng mục 4 -> hàng đợi gửi Laravel. ZaloInbox::ingest(Integration, array payload): bỏ (stored=false) nếu Integration không connected, receive tắt, is_self, nhóm khi group_mode=off, nhóm không mentions_self khi group_mode=mention_only. Còn lại: DB::transaction giống TelegramInbox (createOrFirst Conversation theo provider+external_chat_id, createOrFirst ChatMessage theo conversation_id+external_message_id, chỉ tin mới mới đổi preview, unread_count++). Body: text, hoặc \"Loại tin chưa hỗ trợ: <ảnh|sticker|tệp|tin nhắn thoại|video|liên kết|khác>\". Tiêu đề hội thoại: thread_name (nhóm) hoặc sender_name (cá nhân) hoặc \"Zalo {thread_id}\".\n\n8. GỬI TIN (REQ-005)\nInterface mới App\\Services\\Chat\\ChatSender {ensureCanSend(Conversation): Integration; send(Conversation, body, clientToken, ?staffName): ChatMessage; resend(ChatMessage): ?ChatMessage}. TelegramSender implements (chỉ thêm implements + nhận tham số Conversation không dùng ở ensureCanSend; hành vi không đổi). ZaloSender: ensureCanSend kiểm status connected + credentials, quyền reply, nhóm khi group_mode=off, proactive tắt và hội thoại chưa có tin in, RateLimiter 'zalo-send' (config services.zalo_bridge.send_per_minute, mặc định 10), health sidecar (connect timeout 1s) -> ChatUnavailableException với câu tiếng Việt. send/resend/settle copy logic TelegramSender (createOrFirst theo client_token, UPDATE nguyên tử unknown|failed -> sending). deliver: ZaloBridgeClient::send; ConnectionException hoặc 5xx -> unknown 'Hết thời gian chờ Zalo, tin có thể đã được gửi.'; 409 not_logged_in -> failed + đánh dấu session_lost; 4xx -> failed. RateLimiter::hit chỉ khi thực sự gọi sidecar.\nChatController: thay TelegramSender/TelegramChannel cứng bằng App\\Services\\Chat\\ChatChannels (registry nhỏ: provider -> sender + presentChannel). send/resend chọn sender theo conversation->provider; provider lạ -> 404. Props: `channel` = kênh của hội thoại đang mở (Telegram nếu chưa mở hội thoại, giữ tương thích), thêm `channels` = map provider -> {status, connected, name} cho chip trong danh sách.\n\n9. HEALTH / KIỂM TRA KẾT NỐI (REQ-007)\nIntegrationController::show thêm prop deferred `bridge` (Inertia::defer) chỉ khi definition login='qr': {running: bool, state: string|null, account_name: string|null}; ZaloBridgeClient::health() connect timeout 1s, timeout 2s, ConnectionException -> running=false. ConfiguredIntegrationProvider::test() thêm chiến lược 'zalo' (passed khi state running; failed với câu cố định khi không chạy/mất phiên) và recordTest như Telegram.\nLưu form (connect()) với definition login='qr': giữ status hiện tại (không tự đặt connected); disconnect(): gọi ZaloBridgeClient::logout() best-effort (bắt mọi ConnectionException/RequestException) rồi xoá như hiện tại.\n\n10. CẤU HÌNH\nconfig/services.php thêm 'zalo_bridge' => [url (ZALO_BRIDGE_URL, mặc định http://127.0.0.1:3790), secret (ZALO_BRIDGE_SECRET), send_per_minute (ZALO_BRIDGE_SEND_PER_MINUTE, 10)]. .env.example thêm ZALO_BRIDGE_URL, ZALO_BRIDGE_PORT=3790, ZALO_BRIDGE_SECRET=, ZALO_BRIDGE_CALLBACK_URL=http://127.0.0.1:8000, ZALO_BRIDGE_SEND_GAP_MS=2000. config/integrations.php zalo: active=true, 'login'=>'qr', 'test'=>'zalo', description/steps mới (TASK-010).\n\n11. MIGRATION VÀ ROLLBACK\nKhông có migration. Rollback theo lớp: (a) tắt kênh: đặt zalo active=false và bỏ 'login'/'test' trong config/integrations.php, dừng sidecar; dữ liệu giữ nguyên. (b) gỡ code: revert các file trong filesToChange; xoá thư mục zalo-bridge/ (gồm node_modules). (c) dữ liệu: \"Ngắt kết nối\" xoá credentials; hội thoại provider zalo còn lại trong conversations/chat_messages, xoá tay nếu muốn (chỉ làm khi bạn yêu cầu). Không đụng dữ liệu Telegram.\n\n12. AN TOÀN\nKhông log: Laravel không ghi body request/response của ZaloBridgeClient và /internal/zalo/*; exception message của Http client không được lưu vào last_error/error (dùng câu cố định). Sidecar: logger.mjs chỉ ghi sự kiện + mã; hàm redact che các khoá cookie, imei, userAgent, user_agent, image, qr, text, msg, content; không console.log đối tượng zca-js. Sidecar không gọi API Zalo nào ngoài login, listener, sendMessage (và hàm lấy context nếu spike yêu cầu) - không đồng bộ danh bạ/lịch sử.\n\n13. CẬP NHẬT THEO SPIKE (TASK-001, 2026-10-27)\n- credentials.cookie là chuỗi JSON của mảng tough-cookie SerializedCookie (lấy từ callback GotLoginInfo); sidecar JSON.parse khi login. imei, user_agent lấy từ cùng callback.\n- QR image: zca-js trả base64 thuần; sidecar thêm tiền tố 'data:image/png;base64,'. Expired/Declined không tự kết thúc: sidecar gọi actions.abort() để dọn promise. QR hết hạn sau ~100 giây.\n- Mã đóng listener: 3000 (DuplicateConnection) -> displaced; 3003 (KickConnection) -> session_lost, không reconnect; 1000 do sidecar tự stop() thì bỏ qua; mã khác -> backoff 5/15/30/60/120s. Hai mã đầu là suy luận từ tên enum, cần xác nhận ở TASK-010.\n- POST /internal/zalo/status: sidecar gửi {state, reason_code} với state = running | session_lost | displaced | reconnect_exhausted, reason_code = chính tên state khi không phải running (null khi running). Lỗi thoát reconnect: state 'reconnect_exhausted'.\n- thread_name luôn null (zca-js không kèm tên nhóm trong message); sender_name lấy từ data.dName.\n- Khi đăng nhập lại từ phiên đã lưu, tên tài khoản không có; /health trả account {uid, name: null} cho tới lần quét QR kế tiếp.\n- Zalo được khởi tạo với {checkUpdate:false, logging:false}; sidecar không gọi hàm Zalo nào ngoài loginQR, login, listener, sendMessage, getOwnId.",
+    "tasks": [
+      {
+        "id": "TASK-001",
+        "title": "Spike xác minh API zca-js 2.2.0 trên type của gói đã cài",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "Chữ ký loginQR, sự kiện listener và cách lấy credentials chưa xác minh; mọi code sidecar phụ thuộc kết quả. Bị chặn tới khi bạn đồng ý cài zca-js (B1).",
+        "requirements": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003",
+          "REQ-004",
+          "REQ-005",
+          "REQ-008"
+        ],
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-006",
+          "AC-008",
+          "AC-010",
+          "AC-014"
+        ],
+        "inScope": "Tạo zalo-bridge/package.json tối thiểu (private, type module, engines node>=24, dependency zca-js đúng 2.2.0), `npm --prefix zalo-bridge install`, `npm --prefix zalo-bridge audit`, đọc zalo-bridge/node_modules/zca-js/dist/index.d.ts và các .d.ts liên quan. Ghi kết quả vào plan này (mục assumptions -> chuyển thành đã xác minh, kèm tên file .d.ts và dòng).",
+        "outOfScope": "Đăng nhập Zalo thật, viết code sidecar, sửa package.json/pnpm-lock.yaml gốc.",
+        "dependencies": [],
+        "approach": "1. Sau khi bạn đồng ý, tạo zalo-bridge/package.json và cài. 2. Liệt kê export: `node -e \"import('zca-js').then(m=>console.log(Object.keys(m)))\"` chạy trong zalo-bridge/. 3. Đọc .d.ts để xác minh: (a) chữ ký loginQR (tham số, callback, enum loại sự kiện: QR đã tạo + trường chứa ảnh base64, đã quét, hết hạn, từ chối, có thông tin đăng nhập), cách huỷ/làm mới QR; (b) login bằng credentials {cookie, imei, userAgent} và kiểu cookie (chuỗi/mảng/jar); (c) cách lấy cookie/imei/userAgent sau loginQR (getContext/getCookie...); (d) listener: tên sự kiện message/error/closed, mã đóng khi Zalo Web khác chiếm; (e) kiểu Message: msgId, threadId, type (ThreadType), isSelf, data.content (string|object), uidFrom, dName, ts, mentions; (f) sendMessage trả về gì (msgId?) và lỗi ném ra (ZaloApiError có code?). 4. Ghi bảng ánh xạ vào plan; điều chỉnh mục 3, 5, 6, 7 của technicalSolution nếu khác giả định. 5. Nếu thiếu thông tin trong .d.ts, đọc dist JS tương ứng (chỉ đọc) và ghi rõ là suy ra từ mã.",
+        "test": "Lệnh liệt kê export chạy được; npm audit không có lỗ hổng high/critical (có thì dừng, báo bạn). Không có kiểm thử với tài khoản thật ở bước này.",
+        "doneWhen": "Plan có bảng xác minh 6 mục (a)-(f) với trích dẫn file .d.ts; giả định nào sai đã được sửa trong technicalSolution; bạn xem kết quả trước khi bắt đầu TASK-004.",
+        "rollback": "Xoá thư mục zalo-bridge/ (package.json, package-lock.json, node_modules).",
+        "risks": "Gói ESM có thể thiếu type cho callback QR -> phải đọc mã JS; API khác giả định có thể buộc đổi state machine QR.",
+        "filesToChange": [
+          {
+            "path": "zalo-bridge/package.json",
+            "changes": "MỚI, thư mục cha mới (tạo trong task; thư mục gốc repo đã tồn tại): package.json riêng: name zalo-bridge, private, type module, engines node>=24, dependencies {\"zca-js\": \"2.2.0\"}, scripts start = \"node --env-file=../.env src/index.mjs\", test = \"node --test test/\"."
+          },
+          {
+            "path": "zalo-bridge/package-lock.json",
+            "changes": "MỚI, sinh bởi npm install trong zalo-bridge/ (không sửa tay)."
+          },
+          {
+            "path": "docs/plans/zalo-qr-channel-20261027.json",
+            "changes": "Cập nhật assumptions/technicalSolution theo kết quả spike."
+          }
+        ],
+        "result": "Cài zca-js@2.2.0 (pin) trong zalo-bridge/, npm audit 0 lỗ hổng, đã xác minh 6 mục (a)-(f); xem content.spikeResult và technicalSolution mục 13."
+      },
+      {
+        "id": "TASK-002",
+        "title": "Nền tảng Laravel: cấu hình, chữ ký HMAC, ZaloBridgeClient, ZaloChannel, khung test",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "Mọi luồng QR, nhận, gửi phía Laravel dùng chung client ký và lớp đọc Integration.",
+        "requirements": [
+          "REQ-003",
+          "REQ-002",
+          "BR-002",
+          "BR-009"
+        ],
+        "acceptanceCriteria": [
+          "AC-007",
+          "AC-016"
+        ],
+        "inScope": "config/services.php khối zalo_bridge; .env.example; .gitignore bỏ zalo-bridge/node_modules; vite.config.ts lint bỏ qua zalo-bridge/**; BridgeSignature (sign/verify, cửa sổ 300s); ZaloBridgeClient (health, qrStart, qrStatus, qrCancel, send, logout; connect timeout 1s, timeout 2s cho health, 5s cho lệnh QR, 15s cho send; không retry; không log body); ZaloBridgeException (status + code, message cố định); ZaloChannel (integration(), connected(), credentials(), allows(), groupMode(), markState(reason_code)); tests/TestCase.php.",
+        "outOfScope": "Route, controller, sidecar.",
+        "dependencies": [],
+        "approach": "1. Thêm config services.zalo_bridge {url, secret, send_per_minute}. 2. BridgeSignature::sign(secret, ts, method, path, body) và verify(...) dùng hash_hmac('sha256') + hash_equals; vector test cố định (secret 'test-secret', ts 1700000000, 'POST', '/send', '{\"a\":1}') dùng chung với test Node. 3. ZaloBridgeClient dựa trên Http::baseUrl(config url)->withHeaders(chữ ký) cho từng request; trả mảng đã validate kiểu; lỗi HTTP -> ZaloBridgeException(status, code từ body.code nếu là chuỗi allowlist). 4. ZaloChannel theo mẫu TelegramChannel: PROVIDER='zalo', connected() yêu cầu status connected + đủ 3 khoá credentials; allows() giống Telegram; groupMode() đọc settings.fields.group_mode, mặc định mention_only; markState(state, reasonCode) ghi meta.bridge_state và status/last_error theo bảng câu cố định. 5. tests/TestCase.php tối thiểu. 6. Chạy `composer run lint`, `composer run types:check`.",
+        "test": "tests/Unit/Zalo/BridgeSignatureTest.php: chữ ký đúng vector cố định; sai 1 ký tự -> false; ts lệch 301s -> false. tests/Feature/Zalo/ZaloBridgeClientTest.php: Http::fake -> request có X-Bridge-Timestamp/X-Bridge-Signature hợp lệ, đúng URL 127.0.0.1; 409 -> ZaloBridgeException code not_logged_in; ConnectionException được ném nguyên (để sender quyết định unknown); Log::spy không nhận body. Chạy `php artisan test --filter=Zalo`.",
+        "doneWhen": "Test trên pass thật; pint và phpstan level 7 sạch cho file mới.",
+        "rollback": "Revert các file sửa, xoá file mới; không ảnh hưởng dữ liệu.",
+        "risks": "Lệch định dạng chuỗi ký giữa PHP và Node (khắc phục bằng vector test chung).",
+        "filesToChange": [
+          {
+            "path": "config/services.php",
+            "changes": "Thêm khối 'zalo_bridge' => ['url' => env('ZALO_BRIDGE_URL', 'http://127.0.0.1:3790'), 'secret' => env('ZALO_BRIDGE_SECRET'), 'send_per_minute' => (int) env('ZALO_BRIDGE_SEND_PER_MINUTE', 10)]."
+          },
+          {
+            "path": ".env.example",
+            "changes": "Thêm ZALO_BRIDGE_URL, ZALO_BRIDGE_PORT=3790, ZALO_BRIDGE_SECRET=, ZALO_BRIDGE_CALLBACK_URL=http://127.0.0.1:8000, ZALO_BRIDGE_SEND_GAP_MS=2000, ZALO_BRIDGE_SEND_PER_MINUTE=10 kèm chú thích."
+          },
+          {
+            "path": ".gitignore",
+            "changes": "Thêm /zalo-bridge/node_modules."
+          },
+          {
+            "path": "vite.config.ts",
+            "changes": "Thêm 'zalo-bridge/**' vào lint.ignorePatterns (sidecar có test riêng bằng node --test)."
+          },
+          {
+            "path": "app/Services/Chat/Zalo/BridgeSignature.php",
+            "changes": "MỚI, thư mục cha mới (tạo trong task; app/Services/Chat đã tồn tại): sign/verify HMAC-SHA256, hằng MAX_SKEW_SECONDS=300."
+          },
+          {
+            "path": "app/Services/Chat/Zalo/ZaloBridgeClient.php",
+            "changes": "MỚI: client Http tới sidecar: health(), qrStart(), qrStatus(loginId), qrCancel(loginId), send(threadId, threadType, text), logout()."
+          },
+          {
+            "path": "app/Services/Chat/Zalo/ZaloBridgeException.php",
+            "changes": "MỚI: lỗi HTTP từ sidecar (status, code allowlist), isAmbiguous() khi status >= 500."
+          },
+          {
+            "path": "app/Services/Chat/Zalo/ZaloChannel.php",
+            "changes": "MỚI: nơi duy nhất đọc credentials zalo; connected(), credentials(), allows(), groupMode(), markState()."
+          },
+          {
+            "path": "tests/TestCase.php",
+            "changes": "MỚI, thư mục cha mới (tạo trong task; thư mục gốc repo đã tồn tại): base TestCase kế thừa Illuminate\\Foundation\\Testing\\TestCase (cần bạn đồng ý tạo tests/, câu hỏi mở)."
+          },
+          {
+            "path": "tests/Unit/Zalo/BridgeSignatureTest.php",
+            "changes": "MỚI (tạo tests/Unit/Zalo/)."
+          },
+          {
+            "path": "tests/Feature/Zalo/ZaloBridgeClientTest.php",
+            "changes": "MỚI (tạo tests/Feature/Zalo/)."
+          }
+        ]
+      },
+      {
+        "id": "TASK-003",
+        "title": "Endpoint nội bộ Laravel cho sidecar: xác thực HMAC, lưu/xin phiên, báo trạng thái",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "Sidecar cần nơi lưu phiên (REQ-002) và báo mất phiên; là hợp đồng cố định để làm sidecar song song.",
+        "requirements": [
+          "REQ-002",
+          "REQ-008",
+          "BR-009",
+          "BR-002"
+        ],
+        "acceptanceCriteria": [
+          "AC-005",
+          "AC-006",
+          "AC-007",
+          "AC-014"
+        ],
+        "inScope": "routes/internal.php đăng ký trong bootstrap/app.php (withRouting then:) ngoài nhóm web; middleware VerifyZaloBridgeSignature (loopback, timestamp, chữ ký, secret rỗng -> 503); throttle:600,1; ZaloBridgeController: storeSession, showSession, status. Route inbound khai báo ở TASK-005.",
+        "outOfScope": "Inbound, QR UI, sidecar.",
+        "dependencies": [
+          "TASK-002"
+        ],
+        "approach": "1. bootstrap/app.php: withRouting(..., then: fn () => Route::middleware([VerifyZaloBridgeSignature::class, 'throttle:600,1'])->prefix('internal/zalo')->name('internal.zalo.')->group(base_path('routes/internal.php'))). 2. Middleware: abort 403 nếu IP không thuộc 127.0.0.1/::1; abort 503 nếu secret rỗng; abort 401 nếu thiếu/sai chữ ký hoặc lệch thời gian (dùng $request->getContent() làm body, getRequestUri() làm path). 3. storeSession: validate credentials.cookie|imei|user_agent string bắt buộc (max 20000), account.uid string, account.name nullable; 409 nếu chưa có Integration zalo với risk_acknowledged; forceFill credentials, status connected, last_error null, last_checked_at, meta merge zalo_account. 4. showSession: 404 nếu không có credentials hoặc status disconnected; trả credentials; header Cache-Control no-store. 5. status: validate state in allowlist, reason_code allowlist; gọi ZaloChannel::markState. 6. Không có dòng Log nào chứa request body.",
+        "test": "tests/Feature/Zalo/InternalEndpointsTest.php: không chữ ký -> 401; chữ ký sai -> 401; ts lệch 301s -> 401; REMOTE_ADDR 10.0.0.5 -> 403; secret rỗng -> 503; storeSession hợp lệ -> 204, Integration::first()->credentials đúng, DB::table('integrations')->value('credentials') không chứa chuỗi cookie; chưa risk_acknowledged -> 409; showSession khi disconnected -> 404; status session_lost -> status error + last_error câu cố định; status running khi có credentials -> connected. Gọi qua $this->call với header ký bằng BridgeSignature.",
+        "doneWhen": "Toàn bộ test pass thật; route:list cho thấy internal/zalo/* không có middleware web/CSRF.",
+        "rollback": "Revert bootstrap/app.php, xoá routes/internal.php, middleware và controller.",
+        "risks": "Sau reverse proxy IP có thể không phải loopback (ghi trong AGENT.md); throttle dùng cache database ở dev.",
+        "filesToChange": [
+          {
+            "path": "bootstrap/app.php",
+            "changes": "Thêm tham số then: trong withRouting để nạp routes/internal.php với prefix internal/zalo, middleware chữ ký + throttle, không qua nhóm web."
+          },
+          {
+            "path": "routes/internal.php",
+            "changes": "MỚI (thư mục routes/ tồn tại): POST session, GET session, POST status (inbound thêm ở TASK-005)."
+          },
+          {
+            "path": "app/Http/Middleware/VerifyZaloBridgeSignature.php",
+            "changes": "MỚI (thư mục tồn tại): kiểm IP loopback, secret cấu hình, timestamp, chữ ký."
+          },
+          {
+            "path": "app/Http/Controllers/ZaloBridgeController.php",
+            "changes": "MỚI (thư mục tồn tại): storeSession, showSession, status (inbound ở TASK-005)."
+          },
+          {
+            "path": "tests/Feature/Zalo/InternalEndpointsTest.php",
+            "changes": "MỚI."
+          }
+        ]
+      },
+      {
+        "id": "TASK-004",
+        "title": "Sidecar zalo-bridge: HTTP 127.0.0.1 ký HMAC, phiên QR, listener có reconnect, gửi tuần tự",
+        "status": "DONE",
+        "priority": "P0",
+        "priorityReason": "Lõi runtime của kênh; bị chặn bởi TASK-001 (B1, B2).",
+        "requirements": [
+          "REQ-001",
+          "REQ-002",
+          "REQ-003",
+          "REQ-004",
+          "REQ-005",
+          "REQ-008",
+          "BR-002",
+          "BR-006",
+          "BR-007",
+          "BR-008",
+          "BR-009"
+        ],
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-003",
+          "AC-005",
+          "AC-006",
+          "AC-007",
+          "AC-014",
+          "AC-016",
+          "AC-018"
+        ],
+        "inScope": "Mã nguồn trong zalo-bridge/src và test trong zalo-bridge/test theo hợp đồng technicalSolution mục 2-7; zca-js được inject qua factory để mock.",
+        "outOfScope": "Tin đa phương tiện, nhiều tài khoản, lưu phiên ra đĩa, express hay gói phụ khác.",
+        "dependencies": [
+          "TASK-001",
+          "TASK-003"
+        ],
+        "approach": "1. config.mjs: đọc ZALO_BRIDGE_PORT, ZALO_BRIDGE_SECRET (bắt buộc, thiếu thì exit 1), ZALO_BRIDGE_CALLBACK_URL, ZALO_BRIDGE_SEND_GAP_MS. 2. signature.mjs: sign/verify giống PHP, crypto.timingSafeEqual. 3. logger.mjs: log JSON một dòng {time, event, code}, redact() đệ quy che khoá nhạy cảm. 4. laravel-client.mjs: fetch ký HMAC tới /internal/zalo/{session,status,inbound}, timeout bằng AbortSignal.timeout; hàng đợi inbound bộ nhớ tối đa 500, retry backoff khi 5xx/lỗi mạng, bỏ khi 4xx. 5. zalo-session.mjs: class ZaloSession(createZalo) quản lý state (idle, qr_pending, connecting, running, reconnecting, session_lost, displaced, stopped); startQr() -> login_id, giữ ảnh QR mới nhất trong bộ nhớ, ánh xạ sự kiện loginQR (theo TASK-001) sang waiting/scanned/expired/declined/logged_in/error; khi có credentials -> laravel.saveSession rồi startListener; loginWithCredentials(); listener message -> normalize -> laravel.inbound; closed -> displaced hoặc reconnect backoff [5,15,30,60,120]s; send() qua hàng đợi tuần tự với khoảng cách SEND_GAP_MS, ánh xạ lỗi: chưa đăng nhập -> 409, lỗi Zalo xác định -> 422 rejected, còn lại -> 502 ambiguous; logout(). 6. normalize.mjs: message zca-js -> hợp đồng inbound (thread_type user|group, mentions_self theo uid của mình, content_type, text chỉ khi là chuỗi). 7. server.mjs: node:http, chỉ listen 127.0.0.1, đọc raw body (giới hạn 64KB), verify chữ ký trước khi parse, route health/qr/send/logout, phản hồi QR Cache-Control no-store. 8. index.mjs: ghép, khởi động -> xin phiên -> login -> báo trạng thái; SIGINT/SIGTERM dừng listener.",
+        "test": "`npm --prefix zalo-bridge test` (node:test, không mạng): signature.test.mjs (cùng vector với PHP, sai chữ ký, lệch giờ); server.test.mjs (thiếu chữ ký -> 401, body > 64KB -> 413, chỉ bind 127.0.0.1); zalo-session.test.mjs với fake Zalo factory (chuỗi sự kiện QR -> trạng thái đúng; logged_in gọi saveSession đúng 1 lần; listener đóng thường -> reconnect theo lịch backoff dùng fake timers của node:test mock.timers; đóng do Zalo Web -> displaced, không reconnect; send tuần tự cách >= gap; lỗi ambiguous -> 502, không gửi lại); normalize.test.mjs (user/group, isSelf, mention, nội dung không phải text); logger.test.mjs (redact che cookie/imei/userAgent/image/text, không có giá trị bí mật trong output). Thiếu ZALO_BRIDGE_SECRET -> process thoát mã 1.",
+        "doneWhen": "Tất cả test sidecar pass thật; chạy `npm --prefix zalo-bridge start` với .env có secret thì GET /health ký đúng trả state idle (khi chưa có phiên). Kiểm thử với tài khoản thật để ở TASK-010.",
+        "rollback": "Xoá zalo-bridge/src, zalo-bridge/test; Laravel vẫn chạy (health báo không chạy).",
+        "risks": "zca-js đổi giao thức hoặc bị Zalo chặn; mã đóng 'Zalo Web nơi khác' có thể không phân biệt được -> phải coi như đóng thường với giới hạn 5 lần; bộ nhớ hàng đợi inbound mất khi sidecar tắt lúc Laravel không chạy.",
+        "filesToChange": [
+          {
+            "path": "zalo-bridge/src/index.mjs",
+            "changes": "MỚI (tạo zalo-bridge/src/; zalo-bridge/ tạo ở TASK-001): entry, ghép các module, xử lý tín hiệu dừng."
+          },
+          {
+            "path": "zalo-bridge/src/config.mjs",
+            "changes": "MỚI: đọc và kiểm env."
+          },
+          {
+            "path": "zalo-bridge/src/signature.mjs",
+            "changes": "MỚI: HMAC sign/verify."
+          },
+          {
+            "path": "zalo-bridge/src/logger.mjs",
+            "changes": "MỚI: log JSON + redact."
+          },
+          {
+            "path": "zalo-bridge/src/laravel-client.mjs",
+            "changes": "MỚI: gọi /internal/zalo/*, hàng đợi inbound."
+          },
+          {
+            "path": "zalo-bridge/src/zalo-session.mjs",
+            "changes": "MỚI: state machine QR/login/listener/send với zca-js inject."
+          },
+          {
+            "path": "zalo-bridge/src/normalize.mjs",
+            "changes": "MỚI: ánh xạ message zca-js sang hợp đồng inbound."
+          },
+          {
+            "path": "zalo-bridge/src/server.mjs",
+            "changes": "MỚI: HTTP server node:http 127.0.0.1."
+          },
+          {
+            "path": "zalo-bridge/test/signature.test.mjs",
+            "changes": "MỚI (tạo zalo-bridge/test/)."
+          },
+          {
+            "path": "zalo-bridge/test/server.test.mjs",
+            "changes": "MỚI."
+          },
+          {
+            "path": "zalo-bridge/test/zalo-session.test.mjs",
+            "changes": "MỚI."
+          },
+          {
+            "path": "zalo-bridge/test/normalize.test.mjs",
+            "changes": "MỚI."
+          },
+          {
+            "path": "zalo-bridge/test/logger.test.mjs",
+            "changes": "MỚI."
+          }
+        ],
+        "result": "Sidecar zalo-bridge/src/*.mjs + test/*.test.mjs (42 test `node --test` pass, mock zca-js, không mạng); GET /health ký đúng trả state idle khi chạy thật (env truyền trực tiếp, không dùng .env). Vector HMAC dùng chung: zalo-bridge/test/fixtures/hmac-vectors.json. Chưa kiểm thử với Zalo thật (TASK-010). Script test là `node --test` (dạng `node --test test/` lỗi trên Node 24).",
+        "filesActuallyChanged": [
+          "zalo-bridge/package.json",
+          "zalo-bridge/package-lock.json",
+          "zalo-bridge/README.md",
+          "zalo-bridge/src/{index,config,signature,logger,laravel-client,zalo-session,normalize,server}.mjs",
+          "zalo-bridge/support/helpers.mjs (hàm giả cho test; nằm ngoài test/ vì node --test chạy mọi file trong test/)",
+          "zalo-bridge/test/{signature,server,zalo-session,normalize,logger,laravel-client}.test.mjs",
+          "zalo-bridge/test/fixtures/hmac-vectors.json"
+        ]
+      },
+      {
+        "id": "TASK-005",
+        "title": "Nhận tin Zalo: endpoint inbound và ZaloInbox lưu Conversation/ChatMessage",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "Không có tin đến thì /chat không có hội thoại Zalo để trả lời.",
+        "requirements": [
+          "REQ-004",
+          "BR-004",
+          "BR-005",
+          "BR-007"
+        ],
+        "acceptanceCriteria": [
+          "AC-007",
+          "AC-008",
+          "AC-009",
+          "AC-015"
+        ],
+        "inScope": "POST /internal/zalo/inbound, validate hợp đồng, ZaloInbox::ingest theo mẫu TelegramInbox, lọc theo receive/group_mode/is_self/trạng thái kết nối.",
+        "outOfScope": "Tải ảnh/tệp, lưu tin isSelf, thông báo đẩy.",
+        "dependencies": [
+          "TASK-003"
+        ],
+        "approach": "1. routes/internal.php thêm POST inbound -> ZaloBridgeController::inbound. 2. Validate: message_id, thread_id string max 64; thread_type in user,group; content_type allowlist; text nullable string max 20000; mentions_self, is_self boolean; sent_at_ms integer. 3. ZaloInbox::ingest(Integration, array): trả false khi không connected/receive tắt/is_self/nhóm bị lọc; còn lại transaction createOrFirst như TelegramInbox, map thread_type user -> Conversation::TYPE_PRIVATE, group -> TYPE_GROUP; body text hoặc nhãn tiếng Việt; preview giới hạn 120, chỉ tin mới hơn mới đổi preview; unread_count++. 4. Trả {stored: bool}.",
+        "test": "tests/Feature/Zalo/InboundTest.php: tin user hợp lệ -> 1 conversation provider zalo type private + 1 message in, unread 1; gửi lại cùng message_id -> vẫn 1 message, unread 1, stored=false; nhóm + mention_only + mentions_self=false -> stored=false; mentions_self=true -> lưu, type group; group_mode off -> không lưu; all -> lưu; receive bỏ khỏi permissions -> không lưu; is_self=true -> không lưu; Integration disconnected -> không lưu; content_type image -> body 'Loại tin chưa hỗ trợ: ảnh'; chữ ký sai -> 401 không ghi DB; payload thiếu thread_id -> 422.",
+        "doneWhen": "Test pass thật; phpstan sạch.",
+        "rollback": "Xoá route inbound, ZaloInbox; dữ liệu đã nhận giữ nguyên (provider zalo).",
+        "risks": "Định dạng threadId/msgId thực tế có thể vượt 64 ký tự hoặc là số lớn (json-bigint) -> sidecar phải gửi dạng chuỗi (kiểm ở TASK-001).",
+        "filesToChange": [
+          {
+            "path": "routes/internal.php",
+            "changes": "Thêm POST inbound (file tạo ở TASK-003)."
+          },
+          {
+            "path": "app/Http/Controllers/ZaloBridgeController.php",
+            "changes": "Thêm method inbound (file tạo ở TASK-003)."
+          },
+          {
+            "path": "app/Services/Chat/Zalo/ZaloInbox.php",
+            "changes": "MỚI (thư mục tạo ở TASK-002)."
+          },
+          {
+            "path": "tests/Feature/Zalo/InboundTest.php",
+            "changes": "MỚI."
+          }
+        ]
+      },
+      {
+        "id": "TASK-006",
+        "title": "Gửi tin Zalo từ /chat: ZaloSender, interface ChatSender, ChatController chọn kênh theo hội thoại",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "REQ-005 cốt lõi; sai quy tắc gửi gây gửi trùng trên tài khoản cá nhân.",
+        "requirements": [
+          "REQ-005",
+          "BR-003",
+          "BR-004",
+          "BR-005",
+          "BR-006"
+        ],
+        "acceptanceCriteria": [
+          "AC-010",
+          "AC-011"
+        ],
+        "inScope": "Interface ChatSender, TelegramSender implements (không đổi hành vi), ZaloSender, registry ChatChannels, ChatController send/resend chọn sender theo provider.",
+        "outOfScope": "Props/UI đa kênh (TASK-009), gửi media, quote/trả lời trích dẫn.",
+        "dependencies": [
+          "TASK-002"
+        ],
+        "approach": "1. app/Services/Chat/ChatSender.php: ensureCanSend(Conversation): Integration; send(...); resend(...). 2. TelegramSender: implements ChatSender, ensureCanSend nhận ?Conversation (bỏ qua) - giữ nguyên toàn bộ logic. 3. ZaloSender: ensureCanSend theo thứ tự: Integration connected + credentials ('Zalo đang mất kết nối, chưa thể gửi tin.'), quyền reply ('Quyền \"Trả lời tin nhắn\" của Zalo đang tắt.'), nhóm + group_mode off ('Chế độ nhóm đang tắt trả lời trong nhóm.'), proactive tắt và hội thoại chưa có tin in ('Chưa có tin đến từ hội thoại này; gửi chủ động đang tắt.'), RateLimiter::tooManyAttempts('zalo-send', send_per_minute) ('Đang giới hạn tốc độ gửi để bảo vệ tài khoản. Thử lại sau N giây.'), health running ('Zalo bridge không chạy.'). send/resend như TelegramSender; deliver gọi ZaloBridgeClient::send rồi RateLimiter::hit; ConnectionException/ZaloBridgeException ambiguous -> unknown; code not_logged_in -> failed + ZaloChannel::markState('session_lost'); 4xx khác -> failed với câu cố định. 4. ChatChannels: map ['telegram' => TelegramSender, 'zalo' => ZaloSender], sender(provider) abort 404 nếu lạ. 5. ChatController::send/resend dùng ChatChannels theo $conversation->provider / $message->conversation->provider.",
+        "test": "tests/Feature/Zalo/ZaloSenderTest.php (Http::fake cho health + send): 200 {message_id:'m1'} -> sent, external_message_id m1; Http::fake trả ConnectionException cho /send -> unknown, Http::assertSentCount đúng 2 (health + send), không gửi lại; 502 -> unknown; 422 rejected -> failed; 409 not_logged_in -> failed + Integration status error; cùng client_token gọi 2 lần -> 1 request send; resend tin unknown gọi song song 2 lần (lần 2 sau khi lần 1 đã claim) -> lần 2 trả null, chỉ 1 request; vượt 10 lần/phút -> ChatUnavailableException, không tạo ChatMessage, không gọi /send; reply tắt / nhóm + off / chưa có tin in -> chặn; health ConnectionException -> 'Zalo bridge không chạy', không tạo tin. tests/Feature/Chat/TelegramSenderRegressionTest.php: Http::fake api.telegram.org -> hành vi sent/unknown như cũ (đảm bảo không hồi quy).",
+        "doneWhen": "Test pass thật; phpstan sạch; gửi Telegram qua /chat vẫn chạy (test hồi quy).",
+        "rollback": "Revert ChatController, TelegramSender về bản trước; xoá ChatSender, ChatChannels, ZaloSender.",
+        "risks": "Copy logic gửi giữa TelegramSender và ZaloSender (trùng lặp có chủ ý, gom sau nếu thêm kênh thứ ba); RateLimiter dùng cache store, nếu cache bị xoá giới hạn reset.",
+        "filesToChange": [
+          {
+            "path": "app/Services/Chat/ChatSender.php",
+            "changes": "MỚI (thư mục app/Services/Chat tồn tại): interface."
+          },
+          {
+            "path": "app/Services/Chat/ChatChannels.php",
+            "changes": "MỚI: registry provider -> sender/kênh."
+          },
+          {
+            "path": "app/Services/Chat/Telegram/TelegramSender.php",
+            "changes": "Thêm implements ChatSender; chữ ký ensureCanSend nhận Conversation tuỳ chọn; không đổi logic."
+          },
+          {
+            "path": "app/Services/Chat/Zalo/ZaloSender.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "app/Http/Controllers/ChatController.php",
+            "changes": "send/resend chọn sender qua ChatChannels theo provider của hội thoại."
+          },
+          {
+            "path": "tests/Feature/Zalo/ZaloSenderTest.php",
+            "changes": "MỚI."
+          },
+          {
+            "path": "tests/Feature/Chat/TelegramSenderRegressionTest.php",
+            "changes": "MỚI (tạo tests/Feature/Chat/)."
+          }
+        ]
+      },
+      {
+        "id": "TASK-007",
+        "title": "Backend đăng nhập QR, health, kiểm tra kết nối và ngắt kết nối cho Zalo",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "REQ-001/REQ-007/REQ-009: luồng QR không có route proxy thì UI không làm được.",
+        "requirements": [
+          "REQ-001",
+          "REQ-007",
+          "REQ-009",
+          "BR-001",
+          "BR-002",
+          "BR-008"
+        ],
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-002",
+          "AC-003",
+          "AC-004",
+          "AC-013",
+          "AC-015",
+          "AC-017"
+        ],
+        "inScope": "ZaloLoginController (start/status/cancel), route web; definition key 'login' và chiến lược test 'zalo' trong ConfiguredIntegrationProvider; connect() giữ status khi login='qr'; disconnect() gọi logout sidecar best-effort; IntegrationManager::present thêm 'login'; IntegrationController::show thêm prop deferred bridge.",
+        "outOfScope": "Bật active (TASK-010), UI (TASK-008).",
+        "dependencies": [
+          "TASK-002",
+          "TASK-003"
+        ],
+        "approach": "1. routes/web.php nhóm integrations: POST zalo/qr (start), GET zalo/qr (status, query login_id), DELETE zalo/qr (cancel), middleware AuthorizeResource integrations,update; khai báo trước route {provider} để rõ ràng. 2. ZaloLoginController::start: validate risk_acknowledged accepted; Integration::firstOrNew provider zalo, merge settings.risk_acknowledged=true (giữ fields/permissions; Integration mới thì status disconnected); nếu health running thì logout trước; qrStart(); trả JSON {login_id}. ConnectionException -> 503 {message: 'Zalo bridge không chạy. Chạy npm --prefix zalo-bridge start rồi thử lại.'}. status: validate login_id regex [A-Za-z0-9-]{1,64}; trả {state, image, error_code} với header Cache-Control no-store; logged_in thì kèm account_name từ meta. cancel: 204. 3. ConfiguredIntegrationProvider: connect() - nếu definition['login'] === 'qr' thì không ghi đè status (Integration mới -> disconnected); test() thêm 'zalo' => testZalo() dùng ZaloBridgeClient::health() + recordTest; disconnect() - nếu login qr thì try logout() catch Throwable bỏ qua. 4. IntegrationManager: thêm 'login' vào Definition phpstan-type và present() trả 'login' => $definition['login'] ?? null, 'account_name' từ meta.zalo_account.name. 5. IntegrationController::show: nếu definition login qr thêm 'bridge' => Inertia::defer(fn () => ...health...). 6. config/integrations.php: thêm 'login' => 'qr', 'test' => 'zalo' cho zalo (active vẫn false tới TASK-010).",
+        "test": "tests/Feature/Zalo/QrLoginTest.php (actingAs Admin system_admin từ AdminFactory, Http::fake sidecar): không risk_acknowledged -> 422, Http::assertNothingSent; có -> 200 login_id, settings.risk_acknowledged true; sidecar không chạy -> 503 câu cố định; status trả image + Cache-Control no-store; người chỉ có integrations.view -> 403; lưu form zalo khi chưa có phiên -> status vẫn disconnected; test() khi health running -> passed, ConnectionException -> failed 'Zalo bridge không chạy.'; destroy -> credentials null, status disconnected, /logout được gọi; destroy khi sidecar tắt -> vẫn thành công. Kiểm tra props Inertia show zalo không có khoá credentials/cookie/imei.",
+        "doneWhen": "Test pass thật; `php artisan wayfinder:generate` (hoặc build Vite) sinh action cho ZaloLoginController; phpstan sạch.",
+        "rollback": "Revert routes/web.php, ConfiguredIntegrationProvider, IntegrationManager, IntegrationController, config/integrations.php; xoá ZaloLoginController.",
+        "risks": "Đổi connect() ảnh hưởng mọi provider nếu sai điều kiện - chỉ rẽ nhánh khi login='qr', test hồi quy cho telegram (status connected sau lưu).",
+        "filesToChange": [
+          {
+            "path": "routes/web.php",
+            "changes": "Thêm 3 route zalo/qr trong nhóm integrations."
+          },
+          {
+            "path": "app/Http/Controllers/ZaloLoginController.php",
+            "changes": "MỚI (thư mục tồn tại): start, status, cancel."
+          },
+          {
+            "path": "app/Services/Integrations/ConfiguredIntegrationProvider.php",
+            "changes": "connect() giữ status khi login qr; test 'zalo'; disconnect() logout sidecar best-effort."
+          },
+          {
+            "path": "app/Services/Integrations/IntegrationManager.php",
+            "changes": "Definition type thêm login?: string; present() thêm login, account_name."
+          },
+          {
+            "path": "app/Http/Controllers/IntegrationController.php",
+            "changes": "show(): prop deferred bridge cho provider login qr."
+          },
+          {
+            "path": "config/integrations.php",
+            "changes": "zalo: thêm 'login' => 'qr', 'test' => 'zalo'."
+          },
+          {
+            "path": "tests/Feature/Zalo/QrLoginTest.php",
+            "changes": "MỚI."
+          }
+        ]
+      },
+      {
+        "id": "TASK-008",
+        "title": "Giao diện đăng nhập QR và trạng thái bridge trên /integrations/zalo",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "Mục tiêu chính người dùng thấy: bấm nút thì hiện mã QR.",
+        "requirements": [
+          "REQ-001",
+          "REQ-007",
+          "BR-001"
+        ],
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-002",
+          "AC-003",
+          "AC-004",
+          "AC-013"
+        ],
+        "inScope": "Nút \"Quét mã QR mới\" theo mockup connect-zalo.html (nút chính, cạnh Lưu/Kiểm tra/Huỷ/Ngắt kết nối), modal QR dùng components/ui/dialog, dòng \"Bridge đang chạy/không chạy\" và tên tài khoản trong card Trạng thái, type mới.",
+        "outOfScope": "Đổi bố cục hiện có, đổi form trường/quyền, chat UI.",
+        "dependencies": [
+          "TASK-007"
+        ],
+        "approach": "1. types/integration.ts: IntegrationPage thêm login: 'qr' | null, account_name: string | null; type ZaloBridgeHealth {running: boolean; state: string | null; account_name: string | null}; ZaloQrStatus {state: 'waiting'|'scanned'|'expired'|'declined'|'logged_in'|'error'; image: string | null; error_code: string | null}. 2. zalo-qr-dialog.tsx: props open, onClose, onLoggedIn; khi mở: api.post(start) -> login_id; vòng setTimeout 2000ms gọi api.get(status); hiển thị <img alt=\"Mã QR đăng nhập Zalo\"> khi waiting, chữ hướng dẫn \"Mở Zalo trên điện thoại > Quét mã QR\"; scanned: \"Đã quét, xác nhận đăng nhập trên điện thoại\"; expired: \"Mã đã hết hạn\" + nút \"Tạo mã mới\"; declined: \"Bạn đã từ chối đăng nhập\" + \"Tạo mã mới\"; error/503: thông báo + \"Thử lại\"; logged_in: gọi onLoggedIn; đóng khi chưa xong -> api.delete(cancel); clear timer khi unmount; trạng thái đọc qua role=status aria-live=polite. Không lưu ảnh QR ngoài state component. 3. show.tsx: khi integration.login === 'qr' thì nút chính \"Quét mã QR mới\" (disabled khi !form.data.risk_acknowledged hoặc busy), mở dialog; onLoggedIn -> router.reload + toast qua flash hoặc sonner hiện có; card Trạng thái dùng <Deferred data=\"bridge\"> (Inertia 3) hiện \"Bridge đang chạy\"/\"Bridge không chạy\" + account_name. Giữ nguyên cảnh báo ToS đỏ và checkbox. 4. Chạy pnpm run format, pnpm run check, pnpm run types:check.",
+        "test": "pnpm run types:check, pnpm run check sạch. Kiểm thủ công với sidecar fake (chạy sidecar với factory giả hoặc Http::fake không áp dụng cho trình duyệt): ghi testcase trong TASK-010; kiểm với sidecar thật + tài khoản thật cần bạn quét QR (chưa tự động hoá được).",
+        "doneWhen": "Type check và lint sạch; testcase thủ công QR được ghi Not Run trong TASK-010; không có lỗi console khi mở/đóng modal nhiều lần.",
+        "rollback": "Revert show.tsx, types/integration.ts; xoá zalo-qr-dialog.tsx.",
+        "risks": "Poll tiếp tục sau khi đóng modal nếu quên clear timer (test thủ công mở/đóng nhiều lần); ảnh QR base64 lớn trong state chỉ tồn tại khi modal mở.",
+        "filesToChange": [
+          {
+            "path": "resources/js/types/integration.ts",
+            "changes": "Thêm login, account_name vào IntegrationPage; type ZaloBridgeHealth, ZaloQrStatus."
+          },
+          {
+            "path": "resources/js/components/integrations/zalo-qr-dialog.tsx",
+            "changes": "MỚI, thư mục cha mới resources/js/components/integrations/ (resources/js/components tồn tại): modal QR + poll."
+          },
+          {
+            "path": "resources/js/pages/integrations/show.tsx",
+            "changes": "Nút \"Quét mã QR mới\" khi login qr, mở dialog; card Trạng thái thêm health bridge (Deferred) và tên tài khoản."
+          }
+        ]
+      },
+      {
+        "id": "TASK-009",
+        "title": "Khung /chat đa kênh tối thiểu: kênh theo hội thoại, huy hiệu Telegram/Zalo, banner và composer đúng kênh",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "Không có thì hội thoại Zalo hiện sai nhãn Telegram và banner/composer dựa trên trạng thái Telegram.",
+        "requirements": [
+          "REQ-006",
+          "REQ-005"
+        ],
+        "acceptanceCriteria": [
+          "AC-012",
+          "AC-014"
+        ],
+        "inScope": "ChatController::index props channel (theo hội thoại đang mở) + channels (map provider); ChatChannels::present(provider); type chat.ts; ChannelBadge nhận provider; ConversationList dùng channels[provider].connected cho chip Mất kết nối; InfoPanel, header, MessageThread title, banner, link Kết nối lại theo provider.",
+        "outOfScope": "Bộ lọc theo kênh, chip Mất phiên/Cần xử lý, panel AI, mention UI trong composer.",
+        "dependencies": [
+          "TASK-006"
+        ],
+        "approach": "1. ChatChannels::present(provider, ?Integration): {provider, name ('Telegram'|'Zalo'), status, connected, last_error, display_name, bot_username (Telegram) | account (Zalo meta.zalo_account.name), can_send (Telegram 'send', Zalo 'reply')}. 2. ChatController::index: channel = present(activeConversation?->provider ?? 'telegram'); channels = map mọi provider có trong registry (2 query Integration nhỏ hoặc 1 whereIn). 3. chat.ts: ChatChannel thêm provider, name; ChatPageProps thêm channels: Record<string, ChatChannelSummary>. 4. channel-badge.tsx: prop provider, bảng {telegram: ['T','#229ed9','Telegram'], zalo: ['Z','#0068ff','Zalo']}, mặc định chữ cái đầu + màu muted. 5. conversation-list.tsx: bỏ prop connected đơn, nhận channels và tra theo conversation.provider; text rỗng 'Tin nhắn đến từ Telegram hoặc Zalo sẽ hiện ở đây.'. 6. chat/index.tsx: header/banner/disabledReason/confirm resend dùng channel.name; link Kết nối lại `/integrations/${channel.provider}`; LIVE_PROPS thêm 'channels'. 7. info-panel.tsx, message-thread.tsx: tên kênh động (prop channelName). 8. pnpm format/check/types:check.",
+        "test": "tests/Feature/Chat/ChatIndexChannelsTest.php: có 1 hội thoại telegram + 1 zalo -> conversations chứa cả hai; mở hội thoại zalo -> channel.provider 'zalo', channel.connected theo Integration zalo; Integration zalo status error -> channel.connected false, Telegram connected không bị ảnh hưởng; props không chứa credentials. pnpm run types:check, pnpm run check sạch. Thủ công: Telegram gửi/nhận như trước (testcase TASK-010).",
+        "doneWhen": "Test pass thật, type check/lint sạch, hội thoại Telegram hiển thị và gửi như trước.",
+        "rollback": "Revert ChatController, ChatChannels::present, các file chat frontend và chat.ts.",
+        "risks": "Đổi shape props /chat có thể làm vỡ partial reload nếu quên thêm 'channels' vào LIVE_PROPS; hồi quy UI Telegram.",
+        "filesToChange": [
+          {
+            "path": "app/Services/Chat/ChatChannels.php",
+            "changes": "Thêm present(provider) (file tạo ở TASK-006)."
+          },
+          {
+            "path": "app/Http/Controllers/ChatController.php",
+            "changes": "index(): channel theo hội thoại đang mở, thêm prop channels; bỏ presentChannel Telegram cứng."
+          },
+          {
+            "path": "resources/js/types/chat.ts",
+            "changes": "ChatChannel thêm provider, name, account; ChatPageProps thêm channels."
+          },
+          {
+            "path": "resources/js/components/chat/channel-badge.tsx",
+            "changes": "Nhận provider; màu/chữ theo kênh."
+          },
+          {
+            "path": "resources/js/components/chat/conversation-list.tsx",
+            "changes": "Trạng thái kết nối và huy hiệu theo provider của từng hội thoại."
+          },
+          {
+            "path": "resources/js/components/chat/info-panel.tsx",
+            "changes": "Tên kênh/tài khoản động."
+          },
+          {
+            "path": "resources/js/components/chat/message-thread.tsx",
+            "changes": "Tooltip 'Kiểm tra trên <kênh>' động."
+          },
+          {
+            "path": "resources/js/pages/chat/index.tsx",
+            "changes": "Header, banner, disabledReason, xác nhận gửi lại, link Kết nối lại theo channel; LIVE_PROPS thêm channels."
+          },
+          {
+            "path": "tests/Feature/Chat/ChatIndexChannelsTest.php",
+            "changes": "MỚI (tests/Feature/Chat/ tạo ở TASK-006)."
+          }
+        ]
+      },
+      {
+        "id": "TASK-010",
+        "title": "Bật kênh Zalo, cập nhật tài liệu, testcase và nghiệm thu với tài khoản thật",
+        "status": "TODO",
+        "priority": "P0",
+        "priorityReason": "active=true chỉ được bật khi mọi phần đã có; tài liệu là một phần Definition of Done.",
+        "requirements": [
+          "REQ-007",
+          "REQ-008",
+          "REQ-001",
+          "REQ-002",
+          "REQ-004",
+          "REQ-005"
+        ],
+        "acceptanceCriteria": [
+          "AC-017",
+          "AC-002",
+          "AC-006",
+          "AC-014",
+          "AC-018"
+        ],
+        "inScope": "config/integrations.php zalo: active=true, description và steps mới; AGENT.md (cây thư mục zalo-bridge/, mục Chat đa kênh, Tích hợp, cách chạy sidecar, env, giới hạn); testcase Markdown Not Run cho phần cần tài khoản thật; docs/repo/index.json; docs/index.json (theo câu hỏi mở); cập nhật docs/plans/index.json nếu tiêu đề plan đổi.",
+        "outOfScope": "Cài supervisor/launchd; deploy.",
+        "dependencies": [
+          "TASK-004",
+          "TASK-005",
+          "TASK-006",
+          "TASK-007",
+          "TASK-008",
+          "TASK-009"
+        ],
+        "approach": "1. config zalo: active true; description 'Đăng nhập tài khoản Zalo cá nhân bằng mã QR. Kết nối không chính thức.'; steps ['Chạy Zalo bridge: npm --prefix zalo-bridge start.', 'Tick Tôi hiểu rủi ro, bấm Quét mã QR mới.', 'Mở Zalo trên điện thoại, quét mã và xác nhận đăng nhập.', 'Không mở Zalo Web ở nơi khác khi đang dùng kênh này.'] (khớp mockup). 2. AGENT.md: cập nhật mục cây thư mục, Chat đa kênh (Telegram + Zalo), Tích hợp (active zalo, login qr, test zalo), Lệnh phát triển (npm --prefix zalo-bridge install|start|test), yêu cầu nhiều worker PHP. 3. Testcase Markdown liệt kê kiểm thử thủ công (Not Run): quét QR thật, từ chối trên điện thoại, để QR hết hạn, nhận tin cá nhân, nhận tin nhóm có/không mention, gửi tin, khởi động lại sidecar giữ phiên, mở Zalo Web để kiểm displaced, ngắt kết nối, Telegram hồi quy. 4. Chạy toàn bộ: composer run lint:check, composer run types:check, php artisan test, npm --prefix zalo-bridge test, pnpm run check, pnpm run types:check, pnpm run build.",
+        "test": "Tự động: toàn bộ lệnh ở bước 4 pass thật. Thủ công (CHƯA tự động hoá được, cần bạn quét QR bằng tài khoản Zalo thật): các testcase ở bước 3, kết quả ghi đúng thực tế, không đánh dấu Pass khi chưa chạy.",
+        "doneWhen": "Lệnh tự động pass; testcase Not Run đã ghi; bạn chạy và xác nhận ít nhất: quét QR thành công, nhận 1 tin cá nhân, gửi 1 tin, khởi động lại sidecar không cần quét lại.",
+        "rollback": "Đặt lại zalo active=false và bỏ 'login'/'test' để quay về trạng thái chỉ lưu cấu hình; revert tài liệu.",
+        "risks": "Tài khoản Zalo có thể bị cảnh báo/khoá khi thử nghiệm (nên dùng tài khoản phụ); trang tổng quan đổi nhãn từ 'Đã lưu cấu hình' sang trạng thái thật cho Integration zalo cũ đang status connected mà chưa có phiên - cần đặt về disconnected (xem rủi ro còn lại).",
+        "filesToChange": [
+          {
+            "path": "config/integrations.php",
+            "changes": "zalo: active true, description, steps mới; cập nhật chú thích đầu file (QR đã có cho Zalo)."
+          },
+          {
+            "path": "AGENT.md",
+            "changes": "Cập nhật cây thư mục, mục Chat đa kênh, Tích hợp, Lệnh phát triển."
+          },
+          {
+            "path": "docs/repo/zalo-qr-channel-testcases.md",
+            "changes": "MỚI, thư mục cha mới docs/repo/ (docs/ tồn tại): testcase Not Run."
+          },
+          {
+            "path": "docs/repo/index.json",
+            "changes": "MỚI: entry testcase."
+          },
+          {
+            "path": "docs/index.json",
+            "changes": "MỚI (đang thiếu dù AGENT.md nhắc; chỉ tạo nếu bạn đồng ý câu hỏi mở)."
+          },
+          {
+            "path": "docs/plans/index.json",
+            "changes": "Giữ entry plan này; sửa nếu tiêu đề/mô tả đổi."
+          }
+        ]
+      }
+    ],
+    "executionOrder": [
+      "TASK-001",
+      "TASK-002",
+      "TASK-003",
+      "TASK-005",
+      "TASK-006",
+      "TASK-007",
+      "TASK-004",
+      "TASK-008",
+      "TASK-009",
+      "TASK-010"
+    ],
+    "traceability": [
+      {
+        "requirement": "REQ-001",
+        "acceptanceCriteria": [
+          "AC-001",
+          "AC-002",
+          "AC-003"
+        ],
+        "tasks": [
+          "TASK-001",
+          "TASK-004",
+          "TASK-007",
+          "TASK-008"
+        ],
+        "tests": "zalo-session.test.mjs (chuỗi sự kiện QR); QrLoginTest; thủ công quét QR thật (TASK-010)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-001",
+        "acceptanceCriteria": [
+          "AC-004"
+        ],
+        "tasks": [
+          "TASK-007",
+          "TASK-008"
+        ],
+        "tests": "QrLoginTest: thiếu risk_acknowledged -> 422, không gọi sidecar; thủ công: nút QR bị vô hiệu",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-002",
+        "acceptanceCriteria": [
+          "AC-005",
+          "AC-006"
+        ],
+        "tasks": [
+          "TASK-003",
+          "TASK-004",
+          "TASK-010"
+        ],
+        "tests": "InternalEndpointsTest (credentials mã hoá, showSession); zalo-session.test.mjs (khởi động xin phiên); thủ công khởi động lại sidecar",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-003",
+        "acceptanceCriteria": [
+          "AC-018",
+          "AC-007"
+        ],
+        "tasks": [
+          "TASK-001",
+          "TASK-002",
+          "TASK-004"
+        ],
+        "tests": "server.test.mjs (bind 127.0.0.1, 401); BridgeSignatureTest + signature.test.mjs (vector chung); thiếu secret -> exit 1",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-009",
+        "acceptanceCriteria": [
+          "AC-007"
+        ],
+        "tasks": [
+          "TASK-002",
+          "TASK-003",
+          "TASK-004"
+        ],
+        "tests": "InternalEndpointsTest (401/403/503); server.test.mjs",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-004",
+        "acceptanceCriteria": [
+          "AC-008"
+        ],
+        "tasks": [
+          "TASK-004",
+          "TASK-005"
+        ],
+        "tests": "InboundTest (tạo, khử trùng, nhãn tin không phải text); normalize.test.mjs; thủ công nhận tin thật",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-004",
+        "acceptanceCriteria": [
+          "AC-009",
+          "AC-011"
+        ],
+        "tasks": [
+          "TASK-005",
+          "TASK-006"
+        ],
+        "tests": "InboundTest (receive tắt); ZaloSenderTest (reply tắt, proactive tắt)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-005",
+        "acceptanceCriteria": [
+          "AC-009",
+          "AC-011"
+        ],
+        "tasks": [
+          "TASK-005",
+          "TASK-006"
+        ],
+        "tests": "InboundTest (off/mention_only/all); ZaloSenderTest (nhóm + off)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-007",
+        "acceptanceCriteria": [
+          "AC-009"
+        ],
+        "tasks": [
+          "TASK-004",
+          "TASK-005"
+        ],
+        "tests": "InboundTest (is_self không lưu); normalize.test.mjs",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-005",
+        "acceptanceCriteria": [
+          "AC-010"
+        ],
+        "tasks": [
+          "TASK-004",
+          "TASK-006"
+        ],
+        "tests": "ZaloSenderTest (sent/unknown/failed, assertSentCount, client_token, resend claim); zalo-session.test.mjs (502 ambiguous); thủ công gửi tin thật",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-003",
+        "acceptanceCriteria": [
+          "AC-010"
+        ],
+        "tasks": [
+          "TASK-006"
+        ],
+        "tests": "ZaloSenderTest; TelegramSenderRegressionTest",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-006",
+        "acceptanceCriteria": [
+          "AC-011"
+        ],
+        "tasks": [
+          "TASK-004",
+          "TASK-006"
+        ],
+        "tests": "ZaloSenderTest (vượt 10/phút); zalo-session.test.mjs (khoảng cách gửi >= gap)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-006",
+        "acceptanceCriteria": [
+          "AC-012"
+        ],
+        "tasks": [
+          "TASK-009"
+        ],
+        "tests": "ChatIndexChannelsTest; pnpm types:check/check; thủ công Telegram hồi quy",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-007",
+        "acceptanceCriteria": [
+          "AC-013",
+          "AC-017"
+        ],
+        "tasks": [
+          "TASK-007",
+          "TASK-008",
+          "TASK-010"
+        ],
+        "tests": "QrLoginTest (test() zalo, props không lộ credentials, lưu form giữ status); thủ công card Trạng thái",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-008",
+        "acceptanceCriteria": [
+          "AC-014"
+        ],
+        "tasks": [
+          "TASK-003",
+          "TASK-004",
+          "TASK-010"
+        ],
+        "tests": "zalo-session.test.mjs (backoff, displaced); InternalEndpointsTest (status session_lost -> error); thủ công mở Zalo Web",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-008",
+        "acceptanceCriteria": [
+          "AC-014",
+          "AC-003"
+        ],
+        "tasks": [
+          "TASK-004",
+          "TASK-007"
+        ],
+        "tests": "zalo-session.test.mjs (một phiên QR, displaced không reconnect)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "REQ-009",
+        "acceptanceCriteria": [
+          "AC-015"
+        ],
+        "tasks": [
+          "TASK-007",
+          "TASK-005"
+        ],
+        "tests": "QrLoginTest (destroy gọi /logout, sidecar tắt vẫn ngắt); InboundTest (disconnected -> không lưu)",
+        "result": "Not Run"
+      },
+      {
+        "requirement": "BR-002",
+        "acceptanceCriteria": [
+          "AC-005",
+          "AC-016"
+        ],
+        "tasks": [
+          "TASK-002",
+          "TASK-003",
+          "TASK-004",
+          "TASK-007"
+        ],
+        "tests": "logger.test.mjs (redact); ZaloBridgeClientTest (Log không nhận body); InternalEndpointsTest (cột thô không chứa cookie); QrLoginTest (no-store, props không lộ)",
+        "result": "Not Run"
+      }
+    ],
+    "remainingRisks": [
+      "Vi phạm ToS Zalo: tài khoản có thể bị cảnh báo hoặc khoá; nên thử bằng tài khoản phụ. Giảm thiểu bằng giới hạn tốc độ, không gửi chủ động, không đồng bộ dữ liệu ngoài tin nhắn.",
+      "zca-js là thư viện không chính thức, có thể gãy khi Zalo đổi giao thức; pin 2.2.0, nâng cấp phải qua spike lại.",
+      "Chữ ký loginQR và sự kiện listener chưa xác minh (TASK-001); nếu không phân biệt được lý do đóng 'Zalo Web nơi khác', sidecar sẽ reconnect tối đa 5 lần và có thể đá phiên Zalo Web của bạn.",
+      "Chạy Laravel với 1 worker PHP (artisan serve mặc định) có thể làm request QR/gửi tin và callback sidecar chặn nhau; cần PHP_CLI_SERVER_WORKERS >= 2 hoặc php-fpm.",
+      "Sidecar không chạy nền tự động (chưa có supervisor/pm2/launchd): tắt terminal là ngừng nhận tin; tin đến khi sidecar tắt có thể không bao giờ được giao lại (tuỳ zca-js, xác minh ở spike).",
+      "Hàng đợi inbound chỉ trong bộ nhớ: sidecar tắt khi Laravel đang không nhận thì mất các tin chưa giao.",
+      "Integration zalo cũ đã lưu form trước đây có status=connected nhưng chưa có phiên: sau khi bật active sẽ hiện 'Đã kết nối' sai. Cách xử lý không sửa DB bằng code: bạn bấm 'Ngắt kết nối' một lần trên /integrations/zalo trước khi quét QR (ghi trong testcase).",
+      "Endpoint GET /internal/zalo/session trả credentials cho bất kỳ tiến trình cục bộ nào có ZALO_BRIDGE_SECRET: secret lộ (file .env) đồng nghĩa lộ phiên Zalo.",
+      "Logic gửi trùng lặp giữa TelegramSender và ZaloSender (có chủ ý để không đụng Telegram); khi thêm kênh thứ ba nên gom phần chung.",
+      "Giới hạn độ dài tin Zalo chưa biết; dùng tạm 4096 của Telegram.",
+      "Hiện chưa có thư mục tests/: nếu bạn không đồng ý tạo, các AC phía Laravel không có bằng chứng tự động."
+    ],
+    "spikeResult": {
+      "verifiedAt": "2026-10-27",
+      "package": "zca-js@2.2.0 cài đúng pin trong zalo-bridge/ (package.json riêng); 31 package (cả cây phụ thuộc); `npm audit` trong zalo-bridge: 0 vulnerabilities; npm warn crypto-js@4.2.0 deprecated (phụ thuộc gián tiếp). Nguồn: zalo-bridge/node_modules/zca-js/dist/**/*.d.ts, phần suy ra từ mã đọc dist/*.js (chỉ đọc). Không chạy loginQR thật, không kết nối Zalo.",
+      "items": {
+        "a_loginQR": "VERIFIED. dist/zalo.d.ts: `Zalo.loginQR(options?: {userAgent?, language?, qrPath?}, callback?: LoginQRCallback): Promise<API>`. dist/apis/loginQR.d.ts dòng 3-9: enum LoginQRCallbackEventType {QRCodeGenerated=0, QRCodeExpired=1, QRCodeScanned=2, QRCodeDeclined=3, GotLoginInfo=4}. QRCodeGenerated (dòng 11-25): data {code, image, options, token}, actions {saveToFile, retry, abort}. Từ dist/apis/loginQR.js dòng ~272: `image` đã bị cắt tiền tố `data:image/png;base64,` => là base64 thuần, sidecar phải tự thêm tiền tố. Expired/Scanned/Declined có actions {retry, abort}; Scanned.data {avatar, display_name}; Declined.data {code}. Suy ra từ mã (loginQR.js ~290-340): khi CÓ callback, Expired và Declined KHÔNG tự reject/retry, promise treo cho tới khi gọi actions.retry() hoặc actions.abort() (abort -> reject ZaloApiLoginQRAborted); QR tự hết hạn sau 100 giây. Không có callback thì ghi qr.png ra đĩa => sidecar BẮT BUỘC truyền callback (không lưu QR ra đĩa).",
+        "b_loginWithCredentials": "VERIFIED. dist/zalo.d.ts: `login(credentials: Credentials): Promise<API>`, Credentials = {imei: string, cookie: Cookie[] | toughCookie.SerializedCookie[] | {url, cookies: Cookie[]}, userAgent: string, language?: string}. Cookie là MẢNG/đối tượng, không phải chuỗi => lưu ở Laravel dưới dạng chuỗi JSON (JSON.stringify của mảng SerializedCookie) và JSON.parse khi login. Từ zalo.js dòng 41-42: thiếu imei/cookie/userAgent ném ZaloApiError('Missing required params'). Mặc định Options.checkUpdate=true làm zca-js gọi registry.npmjs.org và logging=true: sidecar truyền {checkUpdate:false, logging:false} (Options có hai khoá này, context.d.ts 146-159).",
+        "c_getCredentialsAfterLogin": "VERIFIED. Callback GotLoginInfo (loginQR.d.ts 52-59): data {cookie: SerializedCookie[], imei: string, userAgent: string}, actions null; zalo.js dòng ~87-98 phát sự kiện này TRƯỚC khi gọi loginCookie, sau đó Zalo.loginQR resolve với API đã đăng nhập. Lấy credentials bằng callback này (đúng 3 trường của hợp đồng). API cũng có getCookie(): CookieJar (apis/getCookie.d.ts) và getOwnId(): string (apis/getOwnId.d.ts) => uid tài khoản. Tên hiển thị: lấy từ QRCodeScanned.data.display_name (không cần gọi thêm fetchAccountInfo). Khi đăng nhập lại từ phiên đã lưu thì không có tên, sidecar chỉ báo uid.",
+        "d_listenerEvents": "VERIFIED. api.listener (apis.d.ts dòng 160) là EventEmitter: 'connected', 'disconnected'(code, reason), 'closed'(code, reason), 'error'(unknown), 'message'(Message), ... (apis/listen.d.ts 28-45). `start({retryOnClose?: boolean})`, `stop()`. enum CloseReason (listen.d.ts 22-27): ManualClosure=1000, AbnormalClosure=1006, DuplicateConnection=3000, KickConnection=3003. Từ listen.js dòng 123-140: 'closed' chỉ phát khi không còn thử lại nội bộ; với retryOnClose=false mọi lần đóng phát 'closed' ngay. Sidecar dùng retryOnClose=false để tự áp lịch backoff của plan (tránh hai tầng retry). SUY LUẬN (không xác minh được nếu không có Zalo thật): 3000 DuplicateConnection là mã khi mở Zalo Web/phiên khác => xử lý 'displaced', không reconnect. 3003 KickConnection chưa rõ nguyên nhân => sidecar coi là session_lost, không reconnect. Cần xác nhận bằng tài khoản thật ở TASK-010. Việc đóng do chính sidecar gọi stop() phát code 1000 và bị bỏ qua.",
+        "e_messageShape": "VERIFIED. models/Message.d.ts: `Message = UserMessage | GroupMessage`, mỗi loại có `type: ThreadType` (User=0, Group=1; models/Enum.d.ts), `threadId`, `isSelf`, `data: TMessage` {msgId: string, uidFrom, idTo, dName, ts: string, content: string | TAttachmentContent | TOtherContent, msgType: string, quote?, ...}; GroupMessage.data thêm `mentions?: {uid, pos, len, type: 0|1}[]`. Mặc định Options.selfListen=false nên tin tự gửi không phát ra (sidecar vẫn bỏ is_self). KHÔNG có tên nhóm/thread_name trong message => thread_name luôn null, Laravel dùng tiêu đề dự phòng 'Zalo {thread_id}' cho nhóm. CHƯA xác minh: bảng giá trị msgType cho ảnh/sticker/tệp/voice/video/link (không có trong .d.ts); normalize.mjs dùng tên suy đoán (chat.photo, chat.sticker, share.file, chat.voice, chat.video.msg, chat.recommended) và mọi giá trị lạ rơi về 'other'. text chỉ lấy khi content là chuỗi. Ý nghĩa mention type 1 (có thể là @tất cả) chưa xác minh; chỉ so uid.",
+        "f_sendMessageResultAndErrors": "VERIFIED. apis/sendMessage.d.ts dòng 96-99: `sendMessage(message: MessageContent | string, threadId: string, type?: ThreadType): Promise<{message: SendMessageResult | null, attachment: SendMessageResult[]}>`, SendMessageResult = {msgId: number}. Sidecar trả message_id = String(message.msgId) hoặc null khi message là null. Lỗi: ZaloApiError (Errors/ZaloApiError.d.ts) {message, code: number | null}, name='ZcaApiError' (ZaloApiError.js). Từ utils.js dòng 575-616: Zalo từ chối rõ ràng => code = error_code số; HTTP lỗi/parse lỗi => code null; lỗi mạng của fetch là Error thường. Quy ước sidecar: ZcaApiError có code số => 422 rejected; còn lại (code null, lỗi mạng, timeout) => 502 ambiguous, không tự gửi lại. Không có hằng số mã lỗi nào được liệt kê trong .d.ts; ý nghĩa từng error_code CHƯA xác minh. Đăng nhập bằng credentials hết hạn chỉ cho ZaloApiError('Đăng nhập thất bại') không mã => sidecar coi mọi ZcaApiError lúc login là session_lost, lỗi mạng là retry (có thể phân loại sai nếu Zalo trả lỗi tạm thời; xem remainingRisks).",
+        "h_contacts": "VERIFIED (2026-10-27, đọc node_modules/zca-js/dist/**/*.d.ts + apis/*.js, không gọi Zalo thật). (1) Bạn bè: `api.getAllFriends(count = 20000, page = 1, avatarSize = AvatarSize.Small): Promise<User[]>` (apis/getAllFriends.d.ts; GET .../api/social/friend/getfriends, 1 request); User có `userId`, `displayName`, `zaloName`, `phoneNumber`... sidecar chỉ lấy userId + displayName||zaloName. (2) Nhóm: `api.getAllGroups(): Promise<{ version: string; gridVerMap: { [groupId: string]: string } }>` (apis/getAllGroups.d.ts) chỉ trả id nhóm, KHÔNG có tên. (3) Tên nhóm: `api.getGroupInfo(groupId: string | string[]): Promise<{ removedsGroup: string[]; unchangedsGroup: string[]; gridInfoMap: { [groupId]: GroupInfo & {...} } }>` (apis/getGroupInfo.d.ts), `GroupInfo.name: string`; nhận mảng id nên gọi theo lô. Sidecar: GET /contacts gọi getAllFriends 1 lần (count 5000), getAllGroups 1 lần, getGroupInfo theo lô 50 nhóm nghỉ 1 giây giữa lô, tối đa 500 nhóm; cache trong bộ nhớ 5 phút. CHƯA xác minh với Zalo thật: giới hạn số id mỗi lần của getGroupInfo, hành vi khi tài khoản có >5000 bạn (chỉ lấy trang 1), tần suất Zalo coi là bất thường."
+      },
+      "notVerified": [
+        "Hành vi thật của Zalo (QR hết hạn 100s, mã đóng khi mở Zalo Web nơi khác, 3003) chỉ suy ra từ mã/enum, chưa chạy với tài khoản thật (để TASK-010).",
+        "Giá trị msgType cho nội dung không phải text và ý nghĩa mention type 1.",
+        "Giới hạn độ dài tin của Zalo (giữ 4096 theo ChatMessage::MAX_BODY_LENGTH).",
+        "Ý nghĩa các error_code của Zalo khi gửi tin."
+      ]
+    }
+  }
+}

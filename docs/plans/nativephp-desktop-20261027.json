@@ -1,0 +1,193 @@
+{
+ "title": "Chuyển Personal Manager (Lumina CMS) sang ứng dụng NativePHP Desktop",
+ "description": "Tham khảo khi đóng gói app Laravel 13 + React/Inertia hiện có thành ứng dụng máy tính (Mac/Windows/Linux) bằng NativePHP Desktop: bọc app, dữ liệu cục bộ, auth ngoại tuyến, đóng gói, và lộ trình đưa các module từ mockup vào app.",
+ "tags": [
+  "nativephp",
+  "desktop",
+  "electron",
+  "laravel",
+  "inertia",
+  "packaging"
+ ],
+ "createdAt": "2026-10-27",
+ "content": {
+  "meta": {
+   "status": "CANCELLED",
+   "goal": "Chạy app Personal Manager như ứng dụng máy tính độc lập (dạng app), dữ liệu lưu cục bộ, không cần server hay MySQL.",
+   "confirmedScope": "NativePHP Desktop (Mac/Windows/Linux). Lượt này chỉ lập plan chuyển đổi; chưa cài package, chưa sửa code.",
+   "outOfScope": [
+    "NativePHP Mobile (iOS/Android)",
+    "Triển khai các module mới từ mockup (Chat, Email, Lark, Lịch, Việc làm, Bài viết, Tích hợp): liệt kê ở pha P5 để duyệt riêng",
+    "Chạy migration hay seed trên database thật"
+   ],
+   "sources": [
+    "https://nativephp.com/docs/desktop/2/getting-started/installation",
+    "https://nativephp.com/docs/desktop/2/getting-started/releasenotes",
+    "https://nativephp.com/docs/desktop/2/publishing/building",
+    "https://nativephp.com/docs/desktop/2/digging-deeper/databases",
+    "https://nativephp.com/docs/desktop/2/digging-deeper/queues",
+    "https://nativephp.com/docs/desktop/2/digging-deeper/child-processes",
+    "Khảo sát repo: composer.json, config/*, database/*, routes/*, vite.config.ts, .github/workflows/tests.yml"
+   ],
+   "currentState": [
+    "PHP ^8.3, laravel/framework ^13.17, Inertia 3, React 19, Vite 8 (composer.json, package.json).",
+    "Mặc định đã là SQLite; session, queue, cache đều dùng driver database; không dùng Redis, MySQL, Pusher, Reverb (config/database.php:20, .env.example).",
+    "Migration dùng kiểu portable (json, enum, foreignId, softDeletes), không có SQL riêng của MySQL.",
+    "Chưa có thư mục tests/; CI dùng setup-node nhưng không có pnpm trong khi composer setup gọi pnpm install."
+   ],
+   "cancelNote": "ĐÃ BỎ (2026-10-27): không chuyển sang NativePHP; app sẽ làm bằng công nghệ khác do người dùng chọn."
+  },
+  "requirements": [
+   "R1: App chạy được trong cửa sổ Electron qua NativePHP Desktop, dùng bản NativePHP hỗ trợ Laravel 13 (nativephp/desktop từ 2.2.0, bản mới nhất 2.4.0 theo doc).",
+   "R2: Dữ liệu (SQLite), log và file tải lên nằm trong thư mục dữ liệu người dùng của hệ điều hành, không nằm trong thư mục cài app.",
+   "R3: Lần chạy đầu tự tạo database, tạo admin và buộc đổi mật khẩu (hiện seeder đặt mật khẩu bằng chính email).",
+   "R4: Đăng nhập và các thao tác chính hoạt động ngoại tuyến: không phụ thuộc email xác minh hay SMTP.",
+   "R5: APP_URL, URL public disk, Ziggy và cấu hình passkeys không phụ thuộc cổng cố định của dev.",
+   "R6: Build được bản cài đặt cho macOS, Windows, Linux bằng native:build, có ký và cập nhật tự động (updater).",
+   "R7: Không nhét secret vào bản đóng gói (.env bị lọc theo cleanup_env_keys)."
+  ],
+  "businessRules": [
+   "Không chạy migration hay seed trên database thật khi chưa được yêu cầu rõ.",
+   "Không sửa file Wayfinder sinh tự động trong resources/js/actions, routes, wayfinder.",
+   "Không thêm dependency ngoài NativePHP khi chưa được duyệt.",
+   "Giữ nguyên giao diện Lumina hiện có; chỉ thêm UI mới khi được yêu cầu.",
+   "Chưa commit hay push khi chưa có lệnh rõ."
+  ],
+  "phases": [
+   {
+    "id": "P0",
+    "title": "Chốt quyết định và spike kỹ thuật",
+    "tasks": [
+     "Xác nhận trên nhánh thử: nativephp/desktop tương thích Laravel 13.17, PHP 8.3, Node 22.",
+     "Spike: chạy app hiện có trong Electron, kiểm tra Vite build, Inertia 3, Wayfinder, Ziggy và font có tải được ngoại tuyến (doc NativePHP không nói về Vite/Inertia, cần thử thật).",
+     "Chốt các câu hỏi mở bên dưới (ký ứng dụng, nơi đặt updater, passkeys, email)."
+    ],
+    "filesToChange": []
+   },
+   {
+    "id": "P1",
+    "title": "Bọc app hiện có bằng NativePHP",
+    "tasks": [
+     "composer require nativephp/desktop rồi php artisan native:install (tạo provider, config/nativephp.php, script native:dev).",
+     "Cấu hình cửa sổ chính, menu ứng dụng trong NativeAppServiceProvider; đặt app_id, version, deeplink_scheme trong config/nativephp.php.",
+     "Thêm prebuild chạy build frontend và sinh Wayfinder trước khi đóng gói; loại public/hot và public/fonts-manifest.dev.json khỏi bản đóng gói."
+    ],
+    "filesToChange": [
+     "composer.json",
+     "package.json",
+     "vite.config.ts",
+     "resources/views/app.blade.php",
+     ".env.example"
+    ],
+    "newFiles": [
+     "app/Providers/NativeAppServiceProvider.php",
+     "config/nativephp.php"
+    ]
+   },
+   {
+    "id": "P2",
+    "title": "Dữ liệu và cấu hình lúc chạy",
+    "tasks": [
+     "Dùng SQLite trong thư mục appdata do NativePHP cấp; bật foreign_key_constraints cho kết nối SQLite.",
+     "Đưa storage, log và thư mục tạm của File Manager về đường dẫn appdata; kiểm tra gd, zip, sqlite có trong PHP đóng gói (File Manager dùng ZipArchive và GD).",
+     "Tính APP_URL, URL public disk, Ziggy base URL và passkeys (relying_party_id, allowed_origins) từ URL lúc chạy.",
+     "Khai báo queue_workers nếu sau này có job; hiện chưa có job nào nên có thể dùng sync.",
+     "Bỏ các biến Redis không dùng khỏi .env.example."
+    ],
+    "filesToChange": [
+     "config/database.php",
+     "config/filesystems.php",
+     "config/fortify.php",
+     "config/logging.php",
+     "config/nativephp.php"
+    ]
+   },
+   {
+    "id": "P3",
+    "title": "Đăng nhập và khởi tạo lần đầu (ngoại tuyến)",
+    "tasks": [
+     "Bootstrap lần chạy đầu: chạy migrate, tạo admin, buộc đổi mật khẩu (không dùng mật khẩu bằng email).",
+     "Bỏ ràng buộc email verified trên nhóm route settings, hoặc tự đặt email_verified_at, vì không có SMTP trên máy người dùng.",
+     "Tắt hoặc đưa vào hàng đợi các thông báo mail (AdminLoggedInNotification, AdminAccountCreatedNotification) khi chạy desktop.",
+     "Passkeys: chỉ bật nếu spike chứng minh WebAuthn chạy ổn trong Electron; mặc định tắt.",
+     "Giữ nguyên 2FA TOTP (chạy ngoại tuyến được)."
+    ],
+    "filesToChange": [
+     "database/seeders/DatabaseSeeder.php",
+     "routes/settings.php",
+     "config/fortify.php",
+     "app/Providers/CmsServiceProvider.php"
+    ]
+   },
+   {
+    "id": "P4",
+    "title": "Đóng gói, cập nhật và CI",
+    "tasks": [
+     "native:build cho mac, win, linux; ký macOS (Apple ID, team id, notarize) và Windows (khuyến nghị Azure Trusted Signing).",
+     "Cấu hình updater (github, s3, spaces hoặc R2) và quy trình tăng version mỗi lần phát hành.",
+     "Sửa CI: thêm cài pnpm, thống nhất một lockfile (đang có cả package-lock.json và pnpm-lock.yaml), kiểm tra dependency rollup cho darwin (package.json chỉ ghim linux-x64 và win32-x64).",
+     "Thêm bộ test tối thiểu (smoke: đăng nhập, trang chủ, tạo bản ghi) vì chưa có thư mục tests/."
+    ],
+    "filesToChange": [
+     "composer.json",
+     "package.json",
+     ".github/workflows/tests.yml",
+     "config/nativephp.php"
+    ],
+    "newFiles": [
+     "tests/Feature/*"
+    ]
+   },
+   {
+    "id": "P5",
+    "title": "Module từ mockup (đợt sau, cần duyệt riêng)",
+    "tasks": [
+     "Thứ tự đề xuất: Công việc, Chi tiêu, Thói quen, Ghi chú (theo docs/design/DESIGN.md) rồi Lịch, Email, Lark, Tích hợp và AI, Bài viết, Việc làm, cuối cùng Chat đa kênh.",
+     "Chat đa kênh: bridge Node (Baileys, Telegram, Discord) chạy bằng ChildProcess::node với persistent; bridge Python (instagrapi) không nằm trong runtime đóng gói, cần quyết định riêng.",
+     "Webhook (Messenger, WhatsApp, Telegram) cần URL công khai: desktop không có server nhận vào, cần tunnel hoặc relay.",
+     "OAuth (LinkedIn, Google, Lark) dùng deeplink_scheme; doc chưa mô tả luồng callback nên cần spike."
+    ],
+    "filesToChange": []
+   }
+  ],
+  "acceptanceCriteria": [
+   "AC-1: native:run mở cửa sổ app, đăng nhập được và vào Dashboard mà không cần chạy server riêng.",
+   "AC-2: Cài từ bản build trên máy sạch, dữ liệu nằm trong thư mục appdata; xoá app không đụng dữ liệu repo.",
+   "AC-3: Lần chạy đầu tạo admin và buộc đổi mật khẩu; không có tài khoản nào dùng mật khẩu trùng email.",
+   "AC-4: Ngoại tuyến vẫn đăng nhập, tạo và sửa dữ liệu, tải file lên File Manager được.",
+   "AC-5: Bản build không chứa public/hot và không chứa secret từ .env.",
+   "AC-6: native:build tạo được bản cài cho ít nhất macOS; ký thành công (nếu có tài khoản).",
+   "AC-7: CI chạy xanh gồm lint, types, test."
+  ],
+  "tests": [
+   "Chạy composer lint:check, types:check, npm run check và types:check.",
+   "Test smoke (Feature) cho đăng nhập và bootstrap lần đầu.",
+   "Thủ công: chạy native:run, tắt mạng, kiểm tra đăng nhập, File Manager (zip, ảnh), font và biểu tượng hiển thị.",
+   "Thủ công: build và cài bản đóng gói trên máy sạch cho từng hệ điều hành."
+  ],
+  "assumptions": [
+   "Dùng một admin duy nhất trên mỗi máy (đúng với DESIGN.md: một người dùng).",
+   "SQLite đủ cho dữ liệu cá nhân; không cần MySQL."
+  ],
+  "openQuestions": [
+   "Có tài khoản Apple Developer và chứng chỉ Windows để ký ứng dụng không?",
+   "Updater đặt ở đâu (GitHub Releases, S3, Spaces hay R2)?",
+   "Bật hay tắt passkeys trên desktop?",
+   "Email: tắt hẳn xác minh và đặt lại mật khẩu qua email, hay cho nhập SMTP trong cài đặt?",
+   "Bridge Python (instagrapi) và webhook công khai: dùng tunnel, relay hay bỏ?",
+   "Có cần chạy nền khi đóng cửa sổ (menu bar) không?"
+  ],
+  "blockers": [
+   "Doc NativePHP không nói về Vite, Inertia 3, Wayfinder, SSR, cache/session; cần spike ở P0.",
+   "Luồng OAuth callback qua deeplink trên desktop chưa có tài liệu.",
+   "Chưa kiểm chứng PHP đóng gói có đủ extension gd, zip, sqlite."
+  ],
+  "risks": [
+   "Cross-compile không phải nền tảng nào cũng làm được; có thể cần build trên từng hệ điều hành hoặc CI nhiều OS.",
+   "Passkeys có thể không chạy trong Electron.",
+   "Thông báo mail không có SMTP có thể làm chậm hoặc lỗi lúc đăng nhập.",
+   "Quy mô P5 rất lớn, cần chia nhỏ và duyệt từng module."
+  ],
+  "technicalSolution": "Giữ nguyên Laravel 13 + React/Inertia, thêm nativephp/desktop để bọc thành Electron; dữ liệu SQLite trong appdata; bootstrap lần đầu và auth ngoại tuyến; đóng gói bằng native:build kèm ký và updater; các module mockup triển khai sau theo từng đợt."
+ }
+}

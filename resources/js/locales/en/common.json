@@ -1,0 +1,12 @@
+{
+  "table": {
+    "search_placeholder": "Search...",
+    "columns": "Columns",
+    "selected_rows": "{{count}} row(s) selected",
+    "duplicate": "Duplicate",
+    "delete": "Delete",
+    "import": "Import",
+    "export": "Export",
+    "create": "Create"
+  }
+}

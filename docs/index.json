@@ -1,0 +1,117 @@
+[
+  {
+    "title": "Thiết kế module cá nhân",
+    "url": "docs/design/DESIGN.md",
+    "description": "Hệ thiết kế (token, layout, component) của module Công việc/Lịch."
+  },
+  {
+    "title": "Chat đa kênh: hành vi UI",
+    "url": "docs/design/multi-channel-chat-ui.md",
+    "description": "Mô tả hành vi trang /chat đa kênh."
+  },
+  {
+    "title": "Thiết kế kênh Messenger cá nhân qua mautrix-meta",
+    "url": "docs/design/messenger-personal-mautrix.md",
+    "description": "Tham khảo khi triển khai kênh Messenger cá nhân trong /chat (nhận và trả lời, không đăng bài, không Instagram): Matrix homeserver + mautrix-meta, đăng nhập bằng cookie facebook.com dán tay qua Provisioning API, provider `messenger`, sync/gửi, vận hành, AGPL, rủi ro."
+  },
+  {
+    "title": "Mockup kết nối Zalo",
+    "url": "docs/design/mockups/connect-zalo.html",
+    "description": "Mockup HTML trang kết nối Zalo bằng QR."
+  },
+  {
+    "title": "Plan: modules-integration",
+    "url": "docs/plans/modules-integration-20261027.json",
+    "description": "Plan JSON modules-integration."
+  },
+  {
+    "title": "Plan: nativephp-desktop",
+    "url": "docs/plans/nativephp-desktop-20261027.json",
+    "description": "Plan JSON nativephp-desktop."
+  },
+  {
+    "title": "Plan: personal-channels",
+    "url": "docs/plans/personal-channels-20261027.json",
+    "description": "Plan JSON personal-channels."
+  },
+  {
+    "title": "Plan: roadmap-nativephp-modules",
+    "url": "docs/plans/roadmap-nativephp-modules-20261027.json",
+    "description": "Plan JSON roadmap-nativephp-modules."
+  },
+  {
+    "title": "Plan: zalo-qr-channel",
+    "url": "docs/plans/zalo-qr-channel-20261027.json",
+    "description": "Plan JSON zalo-qr-channel."
+  },
+  {
+    "title": "Plan: email-management",
+    "url": "docs/plans/email-management-20261027.json",
+    "description": "Plan JSON quản lý email trong app (mốc M3): trang /mail, nhiều hộp thư IMAP/SMTP bằng mật khẩu ứng dụng, đồng bộ bằng scheduler, đọc an toàn, trả lời, đánh dấu đã đọc."
+  },
+  {
+    "title": "Mục lục plan",
+    "url": "docs/plans/index.json",
+    "description": "Danh sách các plan."
+  },
+  {
+    "title": "Testcase thủ công kênh Zalo QR",
+    "url": "docs/repo/zalo-qr-channel-testcases.md",
+    "description": "Testcase Not Run cần tài khoản Zalo thật."
+  },
+  {
+    "title": "Testcase thủ công đăng nhập LinkedIn OAuth",
+    "url": "docs/repo/linkedin-oauth-testcases.md",
+    "description": "Testcase Not Run cần app LinkedIn và tài khoản thật."
+  },
+  {
+    "title": "Testcase thủ công đăng bài LinkedIn cá nhân bằng Chrome",
+    "url": "docs/repo/linkedin-personal-browser-testcases.md",
+    "description": "Testcase Not Run cần tài khoản LinkedIn phụ thật, Chrome và Node."
+  },
+  {
+    "title": "Testcase thủ công /chat realtime Pusher",
+    "url": "docs/repo/chat-realtime-pusher-testcases.md",
+    "description": "Testcase Not Run cần app Pusher Channels thật."
+  },
+  {
+    "title": "Testcase thủ công crawl việc làm TopCV/ITviec",
+    "url": "docs/repo/jobs-crawl-testcases.md",
+    "description": "Testcase Not Run cần mạng thật và DB đã migrate."
+  },
+  {
+    "title": "Testcase thủ công Email (nhiều hộp thư IMAP/SMTP)",
+    "url": "docs/repo/email-mailbox-testcases.md",
+    "description": "Testcase Not Run cần hộp thư thật: Gmail/IMAP riêng/Outlook, đồng bộ, HTML an toàn, đọc/chưa đọc, trả lời, không gửi đúp."
+  },
+  {
+    "title": "Testcase thủ công Hộp thư chung (/inbox)",
+    "url": "docs/repo/unified-inbox-testcases.md",
+    "description": "Testcase Not Run cần trình duyệt: danh sách gộp chat + email, lọc kênh, mở thread, phân quyền."
+  },
+  {
+    "title": "Mục lục testcase cấp repo",
+    "url": "docs/repo/index.json",
+    "description": "Danh sách testcase cấp repo."
+  },
+  {
+    "title": "Runbook kênh Messenger cá nhân qua Matrix + mautrix-meta",
+    "url": "docs/repo/messenger-mautrix-runbook.md",
+    "description": "Người dùng tự dựng Synapse + mautrix-meta, đăng nhập cookie facebook.com, bật kênh sau khi tự test; testcase Not Run cần tài khoản Facebook phụ thật."
+  },
+  {
+    "title": "Kênh Messenger cá nhân trong /chat qua Matrix (Synapse) + mautrix-meta: đăng nhập bằng cookie dán tay, nhận/trả lời tin",
+    "url": "docs/plans/messenger-personal-mautrix-20261031.json",
+    "description": "Kế hoạch triển khai kênh Messenger cá nhân qua Synapse + mautrix-meta: 8 task, nhóm coder, AC và traceability; chưa triển khai."
+  },
+  {
+    "title": "Testcase thủ công Trợ lý AI (nhiều tài khoản)",
+    "url": "docs/repo/ai-assistant-testcases.md",
+    "description": "Testcase Not Run cần token/CLI thật và DB đã migrate."
+  },
+  {
+    "title": "Testcase thủ công Chat AI trang chủ",
+    "url": "docs/repo/ai-chat-home-testcases.md",
+    "description": "Testcase Not Run cần token AI thật và DB đã migrate."
+  }
+]

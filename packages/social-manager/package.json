@@ -1,0 +1,31 @@
+{
+  "name": "social-manager",
+  "version": "0.1.0",
+  "description": "Log in, check the session and post text/images to the user's own Facebook and LinkedIn by driving a real Chrome with Playwright.",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./facebook": "./src/facebook/index.mjs",
+    "./linkedin": "./src/linkedin/index.mjs"
+  },
+  "bin": {
+    "social-manager-facebook": "./bin/facebook.mjs",
+    "social-manager-linkedin": "./bin/linkedin.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "peerDependencies": {
+    "playwright-core": ">=1.40.0"
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "description": "Vector ký HMAC dùng chung PHP (App\\Services\\Chat\\Zalo\\BridgeSignature) và Node (zalo-bridge/src/signature.mjs). signature = hex(HMAC-SHA256(secret, \"{timestamp}.{METHOD}.{path}.{body}\")). verify_cases.now là giây Unix; chấp nhận khi |now - timestamp| <= tolerance_seconds.",
+  "secret": "test-secret",
+  "tolerance_seconds": 300,
+  "vectors": [
+    {
+      "name": "post_with_json_body",
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signing_string": "1700000000.POST./send.{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "get_empty_body_with_query",
+      "timestamp": "1700000000",
+      "method": "GET",
+      "path": "/qr/status?login_id=abc123",
+      "body": "",
+      "signing_string": "1700000000.GET./qr/status?login_id=abc123.",
+      "signature": "38c9b3b5d596857699318edcd8972b7635e670485f4bb2ca5aa6abe91c5de73e"
+    },
+    {
+      "name": "post_unicode_body",
+      "timestamp": "1700000123",
+      "method": "POST",
+      "path": "/internal/zalo/inbound",
+      "body": "{\"text\":\"xin chào\"}",
+      "signing_string": "1700000123.POST./internal/zalo/inbound.{\"text\":\"xin chào\"}",
+      "signature": "8c353cb4ab6e0c51187d1ea326e9115a6381f954d7952ebf706beb4d0a343987"
+    }
+  ],
+  "verify_cases": [
+    {
+      "name": "valid",
+      "now": 1700000000,
+      "expected": true,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "valid_at_plus_300",
+      "now": 1700000300,
+      "expected": true,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "valid_at_minus_300",
+      "now": 1699999700,
+      "expected": true,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "stale_plus_301",
+      "now": 1700000301,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "future_minus_301",
+      "now": 1699999699,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "wrong_last_char",
+      "now": 1700000000,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b670"
+    },
+    {
+      "name": "tampered_body",
+      "now": 1700000000,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":2}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "tampered_path",
+      "now": 1700000000,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/logout",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "wrong_method",
+      "now": 1700000000,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "GET",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3fae5a202949daa24f28134b1c2de34aa343bb2d24816846653b67b"
+    },
+    {
+      "name": "short_signature",
+      "now": 1700000000,
+      "expected": false,
+      "timestamp": "1700000000",
+      "method": "POST",
+      "path": "/send",
+      "body": "{\"a\":1}",
+      "signature": "94e561f6e3"
+    }
+  ]
+}

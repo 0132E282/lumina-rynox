@@ -1,0 +1,12 @@
+{
+  "table": {
+    "search_placeholder": "Tìm kiếm...",
+    "columns": "Cột",
+    "selected_rows": "Đã chọn {{count}} dòng",
+    "duplicate": "Nhân bản",
+    "delete": "Xóa",
+    "import": "Nhập",
+    "export": "Xuất",
+    "create": "Tạo mới"
+  }
+}

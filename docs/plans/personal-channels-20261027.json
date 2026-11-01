@@ -1,0 +1,122 @@
+{
+    "title": "Kênh tài khoản cá nhân: WhatsApp, Instagram, Messenger theo pattern Zalo Personal Bridge",
+    "description": "Tham khảo khi triển khai bridge unofficial cho tài khoản cá nhân WhatsApp (Baileys), Instagram (instagrapi) và Messenger (fca-unofficial): tách lõi bridge dùng chung, adapter Laravel chung và triển khai theo từng phase.",
+    "tags": ["whatsapp", "instagram", "messenger", "personal-bridge", "channels", "unofficial"],
+    "createdAt": "2026-10-27",
+    "content": {
+        "meta": {
+            "status": "PLANNED_NOT_IMPLEMENTED",
+            "goal": "Cho bot điều khiển tài khoản cá nhân thật trên WhatsApp, Instagram, Messenger giống Zalo Personal Bridge, bằng hạ tầng bridge và adapter dùng chung thay vì copy Zalo ba lần.",
+            "confirmedScope": "Thứ tự WhatsApp (Baileys) → Instagram (instagrapi, service Python riêng, cùng contract HTTP) → Messenger (@dongdev/fca-unofficial).",
+            "targetRepo": "jam-easychatgpt-backend (nơi có plugins/zalo-personal-bridge và app/Agent/Adapters). Plan này lưu ở personal-manager theo yêu cầu người dùng; mọi đường dẫn bên dưới thuộc jam-easychatgpt-backend.",
+            "outOfScope": [
+                "Refactor Zalo Personal Bridge hiện có",
+                "Thay đổi adapter Business (Messenger/Instagram/WhatsApp chính thức)",
+                "LinkedIn và TikTok Shop",
+                "Gửi chủ động hàng loạt"
+            ],
+            "sources": [
+                "docs/integrations/personal-account-channels-research.md",
+                "plugins/zalo-personal-bridge/src/index.mjs",
+                "app/Agent/Adapters/Zalo/ZaloPersonalAdapter.php",
+                "app/Agent/Adapters/AbstractChannelAdapter.php",
+                "app/Agent/README.md (mục thêm channel)"
+            ]
+        },
+        "requirements": [
+            "R1: Kênh mới whatsapp_personal, instagram_personal, messenger_personal, không dùng lại tên kênh Business.",
+            "R2: Mỗi nền tảng một bridge service cùng contract HTTP với Zalo (inbound webhook + secret, outbound /send, auth /auth/qr/*).",
+            "R3: Phần chung của bridge Node nằm trong plugins/_personal-bridge-core; Instagram là service Python (FastAPI + instagrapi) theo cùng contract.",
+            "R4: Laravel có PersonalBridgeClient, AbstractPersonalChannelAdapter, route webhook chung và một bảng personal_channel_connections.",
+            "R5: Credential phía Laravel dùng encrypted:array; session trên đĩa bridge mã hoá at-rest và chmod 600.",
+            "R6: Có cơ chế giảm rủi ro khoá tài khoản: rate limit, jitter, chỉ trả lời inbound, nhóm cần mention, is_live_mode, tắt kênh khi session_lost."
+        ],
+        "businessRules": [
+            "Mọi tích hợp unofficial vi phạm ToS nền tảng; người dùng phải được thông báo rủi ro trước khi kết nối.",
+            "Timeout gửi trả về trạng thái unknown, không retry để tránh bong bóng trùng.",
+            "Tin is_self hoặc từ thiết bị khác của chủ tài khoản thành ExternalAgentReply, không kích hoạt agent.",
+            "Mỗi kênh có cờ bật riêng theo workspace; Messenger mặc định tắt."
+        ],
+        "phases": [
+            {
+                "id": "P0",
+                "title": "Nền tảng chung",
+                "tasks": [
+                    "Tạo plugins/_personal-bridge-core: express, kiểm tra secret, slot theo connection, watchdog, lưu session mã hoá, postInbound (tách từ pattern zalo-personal-bridge, không sửa Zalo).",
+                    "Migration + model personal_channel_connections (channel, workspace_id, bot_id, personal_uid, status, bridge_session_*, metadata, credentials encrypted:array).",
+                    "app/Agent/Adapters/PersonalChannel/PersonalBridgeClient.php và AbstractPersonalChannelAdapter.php.",
+                    "Route webhook chung integrations/{channel}-personal/webhook qua WebhookDispatcherController::dedupAndDispatch và ProcessInboundWebhook.",
+                    "config/services.php personal_channels.*, .env.example, log channel mỗi kênh trong config/logging.php."
+                ],
+                "filesToChange": [
+                    "app/Agent/AgentServiceProvider.php",
+                    "app/Agent/Harness/AgentHarness.php",
+                    "app/Models/ChatConversation.php",
+                    "routes/api.php",
+                    "config/services.php",
+                    "config/logging.php",
+                    ".env.example"
+                ]
+            },
+            {
+                "id": "P1",
+                "title": "WhatsApp (Baileys / WhiskeySockets)",
+                "tasks": [
+                    "plugins/whatsapp-personal-bridge: login QR, auth state lưu file, text/media/reaction/quote, fromMe.",
+                    "WhatsappPersonalAdapter đăng ký whatsapp_personal; không đụng WhatsappAdapter hiện có.",
+                    "UI QR Vue: tách dialog QR từ ChannelZaloPersonal.vue thành component dùng lại."
+                ]
+            },
+            {
+                "id": "P2",
+                "title": "Instagram (instagrapi, Python)",
+                "tasks": [
+                    "Service Python FastAPI cùng contract, chạy bằng pm2 interpreter hoặc systemd.",
+                    "Đăng nhập username/password + 2FA/challenge, lưu session dump_settings; form UI thay cho QR.",
+                    "Kiểm chứng tần suất poll inbox an toàn."
+                ]
+            },
+            {
+                "id": "P3",
+                "title": "Messenger (@dongdev/fca-unofficial)",
+                "tasks": [
+                    "Bridge Node login cookie/AppState, realtime MQTT.",
+                    "Khoá phiên bản thư viện, cờ bật riêng theo workspace, mặc định tắt."
+                ]
+            }
+        ],
+        "acceptanceCriteria": [
+            "AC-1: Webhook sai secret bị từ chối; đúng secret được dedup theo source_id.",
+            "AC-2: Tin echo/is_self không kích hoạt agent.",
+            "AC-3: Nhóm chỉ kích hoạt khi mention bot.",
+            "AC-4: Restart bridge khôi phục session đã lưu mà không cần đăng nhập lại.",
+            "AC-5: session_lost tắt kênh và gửi cảnh báo qua BridgeConnectionAlertService.",
+            "AC-6: Gửi timeout trả unknown, không retry.",
+            "AC-7: Credential không xuất hiện plain trong DB hay log."
+        ],
+        "tests": [
+            "Bridge Node: node --test; bridge Python: pytest.",
+            "Laravel feature test theo mẫu ZaloPersonalWebhookHarnessTest (secret, dedup, echo, mention, Http::fake) và unit test receipt.",
+            "Thủ công mỗi kênh với tài khoản thử riêng: đăng nhập, nhắn vào, bot trả lời, restart bridge, ép session_lost.",
+            "Chạy lint, types:check, build frontend nếu repo có."
+        ],
+        "assumptions": [
+            "Bridge và Laravel chạy cùng mạng nội bộ; bridge không public.",
+            "Instagram hoàn toàn poll, không có push."
+        ],
+        "openQuestions": [
+            "Hạn mức gói (plan_modules, add_channel_quotas_to_subscription_plans) có tính kênh cá nhân mới như kênh mới không?",
+            "Một workspace có nhiều tài khoản cùng nền tảng không?",
+            "Nội dung cảnh báo ToS/rủi ro hiển thị cho người dùng cuối."
+        ],
+        "blockers": [
+            "Chưa có tài khoản thử WhatsApp/Instagram/Messenger để smoke test thật.",
+            "Chưa kiểm chứng mức maintain hiện tại của @dongdev/fca-unofficial."
+        ],
+        "risks": [
+            "Thư viện unofficial gãy khi nền tảng đổi giao thức: khoá phiên bản, cờ tắt kênh để rollback.",
+            "Tài khoản bị khoá: rủi ro WhatsApp thấp nhất, Instagram trung bình, Messenger cao nhất."
+        ],
+        "technicalSolution": "Một bridge service mỗi nền tảng, lõi Node dùng chung, Instagram là service Python cùng contract; Laravel dùng PersonalBridgeClient và adapter chung kế thừa AbstractChannelAdapter, một bảng connection chung, credential mã hoá."
+    }
+}
