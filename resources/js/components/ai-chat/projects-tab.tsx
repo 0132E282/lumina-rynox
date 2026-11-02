@@ -32,7 +32,6 @@ import { home } from '@/routes';
 import type { AiChatConversation, AiChatRepo } from '@/types';
 
 const REPOS_TTL_MS = 5 * 60 * 1000;
-const HIDDEN_KEY = 'ai-chat.hidden-repos';
 
 /** * "Code" tab: the projects the person can open (GitHub repos the token can read, plus the allowed local folders); picking one selects it for the chat and opens its code. */
 export function ProjectsTab({
@@ -75,55 +74,64 @@ export function ProjectsTab({
     // * The project whose chats are about to be deleted (the project itself stays in the list).
     const [pendingDelete, setPendingDelete] = useState<string | null>(null);
     const [deleting, setDeleting] = useState(false);
-    // * GitHub repos the person removed from the list (kept in this browser only; nothing is stored on the server or touched on GitHub).
-    const [hidden, setHidden] = useState<string[]>(() => {
-        try {
-            return JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? '[]');
-        } catch {
-            return [];
+    // * The GitHub repos the person added to this list (kept on the server per admin); repos that were not added never show.
+    const [added, setAdded] = useState<string[] | null>(null);
+
+    useEffect(() => {
+        api.get<{ projects: string[] }>('/ai-chat/projects')
+            .then(({ data }) => setAdded(data.projects))
+            .catch(() => setAdded([]));
+    }, []);
+
+    const addProject = (name: string) => {
+        if (name.startsWith('local:')) {
+            return;
         }
-    });
+
+        setAdded((current) =>
+            current === null || current.includes(name)
+                ? current
+                : [...current, name],
+        );
+        api.post('/ai-chat/projects', { repo: name }).catch(() => undefined);
+    };
     const hide = (name: string) => {
-        const next = [...new Set([...hidden, name])];
-
-        setHidden(next);
-
-        try {
-            localStorage.setItem(HIDDEN_KEY, JSON.stringify(next));
-        } catch {
-            // * Storage blocked: the repo stays hidden until the page reloads.
-        }
+        setAdded((current) =>
+            current === null ? current : current.filter((n) => n !== name),
+        );
+        api.delete('/ai-chat/projects', { data: { repo: name } }).catch(
+            () => undefined,
+        );
     };
     const lastRepo = useRef(repo);
 
-    // * A hidden project comes back when it is needed: picked again (the repo changes to it) or a chat about it exists.
+    // * A repo that is needed is added by itself: picked elsewhere (the repo changes to it) or a chat about it exists.
     useEffect(() => {
         const picked = repo !== lastRepo.current ? repo : null;
 
         lastRepo.current = repo;
 
-        const needed = hidden.filter(
-            (name) =>
-                name === picked ||
-                conversations.some(
-                    (conversation) => conversation.repo === name,
-                ),
-        );
-
-        if (needed.length === 0) {
+        if (added === null) {
             return;
         }
 
-        const next = hidden.filter((name) => !needed.includes(name));
+        const needed = new Set(
+            conversations
+                .map((conversation) => conversation.repo)
+                .filter((name): name is string => name !== null),
+        );
 
-        setHidden(next);
-
-        try {
-            localStorage.setItem(HIDDEN_KEY, JSON.stringify(next));
-        } catch {
-            // * Storage blocked: it shows again until the page reloads.
+        if (picked !== null) {
+            needed.add(picked);
         }
-    }, [repo, conversations, hidden]);
+
+        needed.forEach((name) => {
+            if (!name.startsWith('local:') && !added.includes(name)) {
+                addProject(name);
+            }
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [repo, conversations, added]);
     const canCreate = local?.enabled === true && local.can_write;
     const localRows: AiChatRepo[] =
         local?.enabled && local.can_read
@@ -242,10 +250,18 @@ export function ProjectsTab({
     ).length;
 
     const query = search.trim().toLowerCase();
-    const shown = [...(connected ? (repos ?? []) : []), ...localRows].filter(
-        (row) =>
-            row.full_name.toLowerCase().includes(query) &&
-            !hidden.includes(row.full_name),
+    // * Only the repos the person added (a repo missing from GitHub's own list still shows by name).
+    const addedRows: AiChatRepo[] = (added ?? []).map(
+        (name) =>
+            (repos ?? []).find((row) => row.full_name === name) ?? {
+                full_name: name,
+                private: false,
+                default_branch: '',
+                description: null,
+            },
+    );
+    const shown = [...addedRows, ...localRows].filter((row) =>
+        row.full_name.toLowerCase().includes(query),
     );
 
     return (
@@ -281,6 +297,7 @@ export function ProjectsTab({
                 githubRepos={connected ? repos : null}
                 onPickRepos={(list) => {
                     if (list.length > 0) {
+                        list.forEach(addProject);
                         onSelect(list[0], list.slice(1));
                     }
                 }}
@@ -291,7 +308,7 @@ export function ProjectsTab({
                 selected={repo === null ? [] : [repo]}
             />
             <div className="min-h-0 flex-1 overflow-y-auto">
-                {connected && repos === null ? (
+                {(connected && repos === null) || added === null ? (
                     <p className="px-2 text-sm text-muted-foreground">
                         Đang tải...
                     </p>
@@ -299,11 +316,7 @@ export function ProjectsTab({
                     <p role="alert" className="px-2 text-sm text-destructive">
                         {error}
                     </p>
-                ) : shown.length === 0 ? (
-                    <p className="px-2 text-sm text-muted-foreground">
-                        Không có repo nào.
-                    </p>
-                ) : (
+                ) : shown.length === 0 ? null : (
                     <ul className="flex flex-col gap-0.5">
                         {shown.map((row) => {
                             const chats = conversations.filter(

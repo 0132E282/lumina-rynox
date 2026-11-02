@@ -428,8 +428,8 @@ export function LocalProjectDialog({
                                     <Button
                                         type="button"
                                         variant="outline"
-                                        size="icon"
-                                        className="size-7 rounded-full"
+                                        size="sm"
+                                        className="h-7 gap-1.5 rounded-md px-2.5 text-xs"
                                         aria-label="Thêm thư mục"
                                         title="Thêm thư mục"
                                         disabled={
@@ -439,6 +439,7 @@ export function LocalProjectDialog({
                                         onClick={() => void chooseFolder()}
                                     >
                                         <Plus aria-hidden="true" />
+                                        Thêm mới
                                     </Button>
                                 </div>
                                 <div className="flex flex-col gap-2 rounded-xl border p-3">
