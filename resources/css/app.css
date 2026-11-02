@@ -153,3 +153,100 @@ html.no-transitions *::before,
 html.no-transitions *::after {
     transition: none !important;
 }
+
+/* Change marks in the code editor's margin (like a git gutter): green = new lines, blue = edited lines, red triangle = removed lines. */
+.pm-gutter-added,
+.pm-gutter-modified {
+    margin-left: 3px;
+    width: 3px !important;
+}
+.pm-gutter-added {
+    background: #2ea043;
+}
+.pm-gutter-modified {
+    background: #388bfd;
+}
+.pm-gutter-deleted {
+    margin-left: 3px;
+    width: 0 !important;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    border-left: 5px solid #f85149;
+    height: 0 !important;
+    margin-top: -4px;
+}
+
+/* "Hoàn tác đoạn này" shown under a change mark in the code editor's margin. */
+.pm-revert-pop {
+    margin-left: 4px;
+    padding: 2px 10px;
+    border: 1px solid var(--border, #d4d4d8);
+    border-radius: 6px;
+    background: var(--popover, #fff);
+    color: var(--popover-foreground, #111);
+    font-size: 12px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.15);
+}
+.pm-revert-pop:hover {
+    background: var(--accent, #f4f4f5);
+}
+
+/* * Loading frame of a picture being made: a grid of dots, with two patches of it brightening and drifting. */
+.pm-dots {
+    background-image: radial-gradient(
+        circle,
+        rgb(59 91 219 / 0.16) 1.5px,
+        transparent 2px
+    );
+    background-size: 27px 27px;
+}
+
+.pm-dots::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(
+        circle,
+        rgb(59 91 219 / 0.8) 1.5px,
+        transparent 2px
+    );
+    background-size: 27px 27px;
+    -webkit-mask-image:
+        radial-gradient(circle at center, #000 0, transparent 70%),
+        radial-gradient(circle at center, #000 0, transparent 70%);
+    mask-image:
+        radial-gradient(circle at center, #000 0, transparent 70%),
+        radial-gradient(circle at center, #000 0, transparent 70%);
+    -webkit-mask-size: 32% 32%;
+    mask-size: 32% 32%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    animation: pm-dots-drift 5s ease-in-out infinite alternate;
+}
+
+@keyframes pm-dots-drift {
+    from {
+        -webkit-mask-position:
+            8% 12%,
+            88% 85%;
+        mask-position:
+            8% 12%,
+            88% 85%;
+    }
+
+    to {
+        -webkit-mask-position:
+            70% 70%,
+            20% 20%;
+        mask-position:
+            70% 70%,
+            20% 20%;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pm-dots::before {
+        animation: none;
+    }
+}

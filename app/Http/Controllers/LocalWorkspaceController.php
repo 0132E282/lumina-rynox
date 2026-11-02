@@ -12,7 +12,7 @@ use App\Support\ResourcePermission;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
-/** * Read-only side of the AI chat's "Máy local" source: which folders exist (ids only), their file list and one file's text. Writing happens only through an approved proposal. */
+/** * Side of the AI chat's "Máy local" source: which folders exist (ids only), their file list and one file's text. Writing happens through an approved proposal or the person's own save of an open file. */
 class LocalWorkspaceController extends Controller
 {
     public function __construct(private readonly LocalWorkspace $workspace) {}
@@ -73,6 +73,44 @@ class LocalWorkspaceController extends Controller
         return $this->guarded($request, fn (): array => $mime === null
             ? ['path' => $data['path'], 'content' => $this->workspace->read($data['root'], $data['path'])]
             : ['path' => $data['path'], 'image' => ImageFiles::dataUrl($mime, $this->workspace->readImage($data['root'], $data['path']))]);
+    }
+
+    public function changes(Request $request): JsonResponse
+    {
+        $data = $request->validate(['root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/']]);
+
+        return $this->guarded($request, fn (): array => $this->workspace->changes($data['root']));
+    }
+
+    public function head(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'path' => ['required', 'string', 'max:300'],
+        ]);
+
+        return $this->guarded($request, function () use ($data): array {
+            $content = $this->workspace->headContent($data['root'], $data['path']);
+
+            return ['path' => $data['path'], 'content' => $content ?? '', 'tracked' => $content !== null];
+        });
+    }
+
+    /** * Saves the person's own edit of one file: same guards and atomic write as an approved proposal; `original` is the text the editor started from, a different file on disk is a 409. */
+    public function save(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'path' => ['required', 'string', 'max:300'],
+            'content' => ['present', 'nullable', 'string'],
+            'original' => ['present', 'nullable', 'string'],
+        ]);
+
+        return $this->guarded($request, function () use ($data): array {
+            $this->workspace->write($data['root'], $data['path'], $data['content'] ?? '', LocalWorkspace::hash($data['original'] ?? ''));
+
+            return ['path' => $data['path']];
+        });
     }
 
     /**

@@ -97,8 +97,11 @@ class GithubReader
         $tree = $this->tree($repo, $branch);
         $paths = array_keys($tree);
 
+        $activity = app(ChatActivity::class);
+        $activity->record('tree', "GitHub {$repo}", count($paths).' tệp, nhánh '.$branch);
         $sections = ["Repo: {$repo} (nhánh {$branch})", $this->treeSection($paths)];
         $sections[] = $this->readme($repo);
+        $activity->record('file', "GitHub {$repo}", 'README');
 
         $rules = $this->rulePaths($paths);
         $skills = $this->skillPaths($paths);
@@ -112,10 +115,12 @@ class GithubReader
 
         foreach (array_slice($rules, 0, self::MAX_RULE_FILES) as $path) {
             $sections[] = $this->fileSection($repo, $branch, $path, 'Rule/chỉ dẫn');
+            $activity->record('file', "GitHub {$repo}", $path);
         }
 
         foreach ($named as $path) {
             $sections[] = $this->fileSection($repo, $branch, $path, 'File');
+            $activity->record('file', "GitHub {$repo}", $path);
         }
 
         $sections[] = $this->hooksSection($repo);

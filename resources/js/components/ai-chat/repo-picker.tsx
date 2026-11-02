@@ -30,6 +30,8 @@ export function RepoPicker({
     compact = false,
     projectTitle = '',
     onProjectTitleChange,
+    open: controlledOpen,
+    onOpenChange,
 }: {
     repo: string | null;
     onChange: (repo: string | null) => void;
@@ -43,8 +45,14 @@ export function RepoPicker({
     /** * Name of the picked group; empty means the first repo's own name. */
     projectTitle?: string;
     onProjectTitleChange?: (title: string) => void;
+    /** * Controlled mode: the dialog is opened from elsewhere (a menu item) and no button is drawn. */
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
 }) {
-    const [open, setOpen] = useState(false);
+    const [innerOpen, setInnerOpen] = useState(false);
+    const controlled = controlledOpen !== undefined;
+    const open = controlledOpen ?? innerOpen;
+    const setOpen = onOpenChange ?? setInnerOpen;
     const [repos, setRepos] = useState<AiChatRepo[] | null>(null);
     // * Same cached request as the Code tab: labels only, never a server path.
     const { data: local, mutate } = useCachedRequest(
@@ -96,7 +104,7 @@ export function RepoPicker({
 
     return (
         <>
-            {compact && selected.length > 0 ? (
+            {controlled ? null : compact && selected.length > 0 ? (
                 <Button
                     type="button"
                     variant="ghost"
@@ -104,7 +112,7 @@ export function RepoPicker({
                     disabled={disabled}
                     aria-label="Thêm dự án"
                     title="Thêm dự án"
-                    className="size-6 text-muted-foreground"
+                    className="size-8 text-foreground/70 hover:text-foreground"
                     onClick={() => setOpen(true)}
                 >
                     <Plus aria-hidden="true" />
@@ -116,7 +124,7 @@ export function RepoPicker({
                     size="sm"
                     disabled={disabled}
                     aria-label="Chọn dự án"
-                    className="h-7 max-w-44 gap-1.5 bg-muted/40 px-2 text-muted-foreground hover:bg-muted/70"
+                    className="h-7 max-w-44 gap-1.5 border border-border/60 bg-muted/40 px-2 text-muted-foreground hover:bg-muted/70"
                     onClick={() => setOpen(true)}
                 >
                     <SourceIcon local={repo?.startsWith('local:') === true} />

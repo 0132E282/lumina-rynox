@@ -147,11 +147,19 @@ export type AiChatIntegration = {
     status_label: string;
 };
 
+/** * One thing the app read for an answer: a file tree, a file, an attachment or a picture (names and counts only). */
+export type AiChatActivityStep = {
+    kind: string;
+    source: string;
+    detail: string;
+};
+
 export type AiChatSendResponse = {
     conversation: AiChatConversation;
     user_message: AiChatMessage;
     assistant_message: AiChatMessage;
     auto_pr_error?: string | null;
+    activity?: AiChatActivityStep[];
 };
 
 /** * One account row of the "Thống kê AI" dialog (the call counts are the signed-in person's own). */
@@ -198,5 +206,7 @@ export type AiAgentRun = {
     step: string;
     /** * The chat it works for (the start of the message). */
     task: string;
+    /** * The conversation it answers in (the pending id until the first answer creates it): its row in Recents shows the working dots. */
+    conversationId: string;
     startedAt: number;
 };

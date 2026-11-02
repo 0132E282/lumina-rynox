@@ -5,6 +5,7 @@ import {
     Menu,
     PanelLeft,
     PanelRight,
+    Plus,
     Terminal,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -12,6 +13,12 @@ import {
     optimize,
     send,
 } from '@/actions/App/Http/Controllers/AiChatController';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { ActivityTerminal } from '@/components/ai-chat/activity-terminal';
 import { BrowserPane } from '@/components/ai-chat/browser-pane';
 import type { ActivityEntry } from '@/components/ai-chat/activity-terminal';
@@ -27,6 +34,10 @@ import { FileViewer } from '@/components/ai-chat/file-viewer';
 import { SidePanel } from '@/components/ai-chat/side-panel';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { SessionPanel } from '@/components/ai-chat/session-panel';
+import { markTyping } from '@/lib/typing';
+import { referenceBlock } from '@/lib/code-reference';
+import type { CodeReference } from '@/lib/code-reference';
+import { SourceIcon } from '@/components/ai-chat/source-icon';
 import { RecentsList } from '@/components/ai-chat/recents-list';
 import type { RecentsTab } from '@/components/ai-chat/recents-list';
 import { Button } from '@/components/ui/button';
@@ -48,12 +59,13 @@ import {
     setAiChatCacheScope,
     writeAiChatCache,
 } from '@/lib/ai-chat-cache';
-import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
+import { OPEN_CONVERSATION_VISIT, PENDING_CHAT_ID } from '@/lib/ai-chat-visit';
 import { cn } from '@/lib/utils';
 import { home } from '@/routes';
 import type {
     Auth,
     AiChatAccount,
+    AiChatActivityStep,
     AiAgentRun,
     AiChatConversation,
     AiChatMessage,
@@ -95,7 +107,7 @@ function ThreadSkeleton() {
         <div
             role="status"
             aria-label="Đang tải cuộc trò chuyện"
-            className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden px-4 pt-16"
+            className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden px-4 pt-4"
         >
             <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
                 {[60, 85, 45].map((width, index) => (
@@ -115,12 +127,18 @@ function ThreadSkeleton() {
 
 type SessionState = { items: ThreadItem[] };
 
-const INFO_OPEN_KEY = 'ai-chat.info-open';
+// * The side panel starts closed on every load; this keeps it as the person left it while they open other chats (the page remounts), not across a reload.
+let infoStaysOpen = false;
 const RECENTS_TAB_KEY = 'ai-chat.recents-tab';
 
 // * Same limits as `SendAiChatMessageRequest` / `ChatAttachmentReader::extensions()`.
 const MAX_ATTACHMENTS = 5;
 const ATTACHMENT_EXTENSIONS = [
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'webp',
     'pdf',
     'docx',
     'txt',
@@ -164,6 +182,7 @@ function ChatPanel({
     initialMessages,
     aiAccounts,
     githubConnected,
+    showProjects,
     repo,
     onRepoChange,
     agents,
@@ -181,11 +200,15 @@ function ChatPanel({
     mode,
     onModeChange,
     settings,
+    askRequest,
+    onPending,
 }: {
     conversation: AiChatConversation | null;
     initialMessages: AiChatMessage[];
     aiAccounts: AiChatAccount[];
     githubConnected: boolean;
+    /** * The project picker belongs to the Code tab only. */
+    showProjects: boolean;
     repo: string | null;
     onRepoChange: (repo: string | null) => void;
     /** * Agents working right now across every chat of this page. */
@@ -210,11 +233,38 @@ function ChatPanel({
     onModeChange: (mode: AiChatMode) => void;
     /** * The person's chat customisation (assistant name and avatar). */
     settings: AiChatSettings;
+    /** * Lines picked in the code viewer: added to the draft once per request. */
+    askRequest: { id: number; reference: CodeReference } | null;
+    /** * A first message of a project chat is on its way: the sidebar lists the chat under its project at once. */
+    onPending: (chat: AiChatConversation | null) => void;
 }) {
     const authUser = usePage<{ auth: Auth }>().props.auth.user;
     const [items, setItems] = useState<ThreadItem[]>(initialMessages);
     const [draft, setDraft] = useState('');
+    // * Code picked in the viewer: shown as tags (file and lines) and sent with the next message.
+    const [references, setReferences] = useState<CodeReference[]>([]);
+    // * What the app read for the last answer: shown in the agent panel.
+    const [activity, setActivity] = useState<AiChatActivityStep[]>([]);
+    // * A request that was there before this chat mounted is already handled.
+    const handledAsk = useRef<number | null>(askRequest?.id ?? null);
+
+    useEffect(() => {
+        if (askRequest !== null && handledAsk.current !== askRequest.id) {
+            handledAsk.current = askRequest.id;
+            setReferences((current) => [...current, askRequest.reference]);
+        }
+    }, [askRequest]);
     const [sending, setSending] = useState(false);
+    // * A send keeps running when the person opens another chat: its answer is saved on the server, so it must not pull them back here.
+    const mounted = useRef(true);
+
+    useEffect(() => {
+        mounted.current = true;
+
+        return () => {
+            mounted.current = false;
+        };
+    }, []);
     const [files, setFiles] = useState<File[]>([]);
     const [optimizing, setOptimizing] = useState(false);
     // * "Tự tạo Pull Request" (default on): AI edits go straight to a new branch + PR; the base branch is never written.
@@ -245,7 +295,12 @@ function ChatPanel({
     const assistant = assistantIdentity(settings, answering);
 
     const submit = async (chosen?: string) => {
-        const text = (chosen ?? draft).trim();
+        const text = (
+            chosen ??
+            [draft.trim(), ...references.map(referenceBlock)]
+                .filter((part) => part !== '')
+                .join('\n\n')
+        ).trim();
 
         if (text === '' || sending) {
             return;
@@ -257,6 +312,7 @@ function ChatPanel({
 
         if (chosen === undefined) {
             setDraft('');
+            setReferences([]);
             setPreviousDraft(null);
             setFiles([]);
         }
@@ -268,6 +324,7 @@ function ChatPanel({
                     ?.name ?? 'AI mặc định',
             step: 'Đang gửi yêu cầu',
             task: text.slice(0, 60),
+            conversationId: conversationId.current ?? PENDING_CHAT_ID,
         });
         setItems((current) => [
             ...current.filter((item) => item.role !== 'error'),
@@ -277,6 +334,15 @@ function ChatPanel({
                 content: text,
             },
         ]);
+
+        if (conversationId.current === null && repo !== null) {
+            onPending({
+                id: PENDING_CHAT_ID,
+                title: text.slice(0, 80),
+                repo,
+                updated_at: new Date().toISOString(),
+            });
+        }
 
         try {
             const form = new FormData();
@@ -361,6 +427,13 @@ function ChatPanel({
 
             const isNew = conversationId.current === null;
 
+            setActivity(data.activity ?? []);
+
+            // * The answer appears as if typed (only when it has no edit cards to wait for).
+            if ((data.assistant_message.proposals ?? []).length === 0) {
+                markTyping(data.assistant_message.id);
+            }
+
             conversationId.current = data.conversation.id;
             setItems((current) => [
                 ...current.filter((item) => item.id !== localId),
@@ -378,7 +451,7 @@ function ChatPanel({
             ]);
 
             // * The first answer creates the conversation: put its id in the URL (a reload keeps the thread) and refresh Recents.
-            if (isNew) {
+            if (isNew && mounted.current) {
                 router.get(
                     home.url({ query: { c: data.conversation.id } }),
                     {},
@@ -397,6 +470,10 @@ function ChatPanel({
                 router.reload({ only: ['conversations'] });
             }
         } catch (caught) {
+            if (mounted.current) {
+                onPending(null);
+            }
+
             onLog('error', `Gửi tin nhắn lỗi: ${aiErrorMessage(caught)}`);
             // * A failed send keeps the attached files so the person can try again.
             setFiles(sentFiles);
@@ -457,6 +534,9 @@ function ChatPanel({
             <ChatComposer
                 value={draft}
                 onChange={setDraft}
+                references={references}
+                activity={activity}
+                onReferencesChange={setReferences}
                 onSubmit={() => void submit()}
                 sending={sending}
                 agents={agents}
@@ -474,6 +554,7 @@ function ChatPanel({
                 extraRepos={extraRepos}
                 onExtraReposChange={setExtraRepos}
                 githubConnected={githubConnected}
+                showProjects={showProjects}
                 mode={mode}
                 onModeChange={onModeChange}
                 autoPr={autoPr}
@@ -486,6 +567,7 @@ function ChatPanel({
                         // * Storage can be blocked; the switch still works for this visit.
                     }
                 }}
+                focusSignal={askRequest?.id}
                 onUndoOptimize={
                     previousDraft === null
                         ? undefined
@@ -535,8 +617,6 @@ function ChatPanel({
                 <ChatThread
                     items={items}
                     pending={sending}
-                    userName={authUser.name}
-                    userAvatar={authUser.avatar}
                     assistant={assistant}
                     onChoose={(text) => void submit(text)}
                     onOpenFile={onOpenFile}
@@ -556,6 +636,7 @@ function ChatPanel({
     );
 }
 
+const CHAT_MIN_WIDTH = 352;
 export default function AiChatIndex({
     conversations,
     activeConversation,
@@ -575,7 +656,27 @@ export default function AiChatIndex({
         items: messages,
     });
     // * Account/model and answer mode live here so the composer and the chat-settings dialog share one state.
+    const selectionKey = `ai-chat.selection.${userId}`;
     const [selection, setSelection] = useState<AiChatSelection>(() => {
+        // * The account and model the person picked last time, while that account still exists.
+        try {
+            const saved = JSON.parse(
+                localStorage.getItem(selectionKey) ?? 'null',
+            ) as AiChatSelection | null;
+
+            if (
+                saved !== null &&
+                aiAccounts.some((account) => account.id === saved.accountId)
+            ) {
+                return {
+                    accountId: saved.accountId,
+                    model: typeof saved.model === 'string' ? saved.model : null,
+                };
+            }
+        } catch {
+            // * Storage can be blocked or hold something else: fall through to the default.
+        }
+
         // * The account chosen for the chat purpose (Cài đặt chat) first, else the first connected one.
         const first =
             aiAccounts.find(
@@ -588,6 +689,13 @@ export default function AiChatIndex({
 
         return { accountId: first?.id ?? null, model: first?.model ?? null };
     });
+    useEffect(() => {
+        try {
+            localStorage.setItem(selectionKey, JSON.stringify(selection));
+        } catch {
+            // * Storage can be blocked; the pick still applies for this visit.
+        }
+    }, [selection, selectionKey]);
     // * An account switched off in the dialog can no longer answer: fall back to the first one that still can.
     useEffect(() => {
         if (
@@ -604,9 +712,7 @@ export default function AiChatIndex({
     }, [aiAccounts, selection.accountId]);
     const [mode, setMode] = useState<AiChatMode>(() => {
         try {
-            return sessionStorage.getItem(MODE_KEY) === 'plan'
-                ? 'plan'
-                : 'auto';
+            return localStorage.getItem(MODE_KEY) === 'plan' ? 'plan' : 'auto';
         } catch {
             return 'auto';
         }
@@ -615,7 +721,7 @@ export default function AiChatIndex({
         setMode(value);
 
         try {
-            sessionStorage.setItem(MODE_KEY, value);
+            localStorage.setItem(MODE_KEY, value);
         } catch {
             // * Storage can be blocked; the mode still applies for this visit.
         }
@@ -623,20 +729,14 @@ export default function AiChatIndex({
     const [settings, setSettings] = useState<AiChatSettings>(savedSettings);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [statsOpen, setStatsOpen] = useState(false);
-    const [infoOpen, setInfoOpen] = useState(() => {
-        try {
-            return sessionStorage.getItem(INFO_OPEN_KEY) === '1';
-        } catch {
-            return false;
-        }
-    });
+    const [infoOpen, setInfoOpen] = useState(infoStaysOpen);
     const [wide, setWide] = useState(
         () => window.matchMedia('(min-width: 1024px)').matches,
     );
     const infoWidth = useResizableWidth('ai-chat.width.info', 288, 220, 480);
     // * Viewer width: about 45% of the screen by default, 360px at least and 70% at most (the saved width wins).
     const viewerBounds = useMemo(() => {
-        const max = Math.max(480, Math.round(window.innerWidth * 0.7));
+        const max = Math.max(480, window.innerWidth);
 
         return {
             max,
@@ -708,11 +808,7 @@ export default function AiChatIndex({
 
     const toggleInfo = () =>
         setInfoOpen((open) => {
-            try {
-                sessionStorage.setItem(INFO_OPEN_KEY, open ? '0' : '1');
-            } catch {
-                // * Storage blocked: the panel still toggles for this visit.
-            }
+            infoStaysOpen = !open;
 
             return !open;
         });
@@ -755,6 +851,26 @@ export default function AiChatIndex({
             : repo;
     const [codeOpen, setCodeOpen] = useState(false);
     // * A file the person clicked in an edit proposal: the code viewer opens it (the id makes the same file open again).
+    // * The chat being created for a project, shown in the sidebar until the saved list arrives.
+    const [pendingChat, setPendingChat] = useState<AiChatConversation | null>(
+        null,
+    );
+
+    useEffect(() => {
+        setPendingChat(null);
+    }, [conversations]);
+
+    const listedConversations = useMemo(
+        () =>
+            pendingChat === null
+                ? conversations
+                : [pendingChat, ...conversations],
+        [pendingChat, conversations],
+    );
+    const [askRequest, setAskRequest] = useState<{
+        id: number;
+        reference: CodeReference;
+    } | null>(null);
     const [openRequest, setOpenRequest] = useState<{
         repo: string;
         path: string;
@@ -766,7 +882,7 @@ export default function AiChatIndex({
         'ai-chat.width.terminal',
         360,
         260,
-        640,
+        window.innerWidth,
     );
     const [terminalDragging, setTerminalDragging] = useState(false);
     const [browserOpen, setBrowserOpen] = useState(false);
@@ -774,7 +890,7 @@ export default function AiChatIndex({
         'ai-chat.width.browser',
         420,
         300,
-        900,
+        window.innerWidth,
     );
     const [browserDragging, setBrowserDragging] = useState(false);
     const terminalVisible = recentsTab === 'projects';
@@ -806,6 +922,10 @@ export default function AiChatIndex({
         (id: number) =>
             setAgents((current) => current.filter((agent) => agent.id !== id)),
         [],
+    );
+    const runningIds = useMemo(
+        () => new Set(agents.map((agent) => agent.conversationId)),
+        [agents],
     );
     const [log, setLog] = useState<ActivityEntry[]>([]);
     const terminal = (
@@ -891,7 +1011,6 @@ export default function AiChatIndex({
             setExtraRepos(extras);
             setViewedRepo(null);
             setRecentsTab('projects');
-            setCodeOpen(true);
             addLog('info', `Chọn repo ${name}`);
 
             // * Picking a project starts a fresh chat for it. preserveState keeps this page mounted: Inertia remounts a page on a plain GET visit, which reset the sidebar to the Chat tab and dropped the repo.
@@ -903,6 +1022,26 @@ export default function AiChatIndex({
     );
     // * Stable callbacks and props: the memoised sidebar re-renders only when its own data changes, not on every thread or panel update.
     const collapseRecents = useCallback(() => setRecentsCollapsed(true), []);
+    // * Dragging a right panel wider squeezes the chat to its minimum first; then the chat list folds, and any further width covers the chat.
+    const chatSection = useRef<HTMLElement>(null);
+
+    useEffect(() => {
+        const section = chatSection.current;
+
+        if (section === null || recentsCollapsed) {
+            return;
+        }
+
+        const observer = new ResizeObserver(() => {
+            if (section.getBoundingClientRect().width <= CHAT_MIN_WIDTH) {
+                setRecentsCollapsed(true);
+            }
+        });
+
+        observer.observe(section);
+
+        return () => observer.disconnect();
+    }, [recentsCollapsed]);
     const closeRecentsSheet = useCallback(() => setRecentsOpen(false), []);
     const openSettings = useCallback(() => setSettingsOpen(true), []);
     const openStats = useCallback(() => setStatsOpen(true), []);
@@ -974,7 +1113,8 @@ export default function AiChatIndex({
                 >
                     <div className="flex min-h-0 w-72 flex-1 flex-col">
                         <RecentsList
-                            conversations={conversations}
+                            conversations={listedConversations}
+                            runningIds={runningIds}
                             aiAccounts={aiAccounts}
                             assistant={sidebarAssistant}
                             account={pickedAccount}
@@ -992,14 +1132,17 @@ export default function AiChatIndex({
                 </aside>
 
                 <section
+                    ref={chatSection}
                     aria-label="Trò chuyện với trợ lý AI"
-                    className="relative flex min-h-0 min-w-[22rem] flex-1 flex-col"
+                    className={cn(
+                        '@container/chat relative flex min-h-0 flex-1 flex-col',
+                        recentsCollapsed ? 'min-w-0' : 'min-w-[22rem]',
+                    )}
                 >
                     <div
                         className={cn(
-                            // * No header bar: the buttons float over the chat's top corners so a folded list leaves no empty strip.
-                            'pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center p-2 [&>*]:pointer-events-auto',
-                            // * On wide screens they are only needed for the collapsed-list button and the code button.
+                            // * A real header bar (white, padded, bottom border) so the chat text never runs behind the buttons.
+                            'relative z-10 flex h-12 shrink-0 items-center border-b bg-background px-2',
                         )}
                     >
                         {recentsCollapsed && (
@@ -1034,7 +1177,8 @@ export default function AiChatIndex({
                                     Các cuộc trò chuyện gần đây với trợ lý AI.
                                 </SheetDescription>
                                 <RecentsList
-                                    conversations={conversations}
+                                    conversations={listedConversations}
+                                    runningIds={runningIds}
                                     aiAccounts={aiAccounts}
                                     assistant={sidebarAssistant}
                                     account={pickedAccount}
@@ -1051,6 +1195,69 @@ export default function AiChatIndex({
                             </SheetContent>
                         </Sheet>
                         <div className="ml-auto flex items-center gap-1">
+                            {/* * A narrow chat folds these buttons into one menu. */}
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        aria-label="Công cụ"
+                                        className="invisible w-0 overflow-hidden px-0 text-muted-foreground opacity-0 transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:visible @max-sm/chat:w-8 @max-sm/chat:opacity-100"
+                                    >
+                                        <Plus aria-hidden="true" />
+                                    </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                    <DropdownMenuItem onSelect={toggleInfo}>
+                                        <PanelRight aria-hidden="true" />
+                                        Thông tin phiên chat
+                                    </DropdownMenuItem>
+                                    {terminalVisible && (
+                                        <DropdownMenuItem
+                                            onSelect={() =>
+                                                setBrowserOpen((open) => !open)
+                                            }
+                                        >
+                                            <Globe aria-hidden="true" />
+                                            Trình duyệt
+                                        </DropdownMenuItem>
+                                    )}
+                                    {terminalVisible && (
+                                        <DropdownMenuItem
+                                            onSelect={() =>
+                                                setTerminalOpen((open) => !open)
+                                            }
+                                        >
+                                            <Terminal aria-hidden="true" />
+                                            Terminal
+                                        </DropdownMenuItem>
+                                    )}
+                                    {repo !== null &&
+                                        !repo.startsWith('local:') && (
+                                            <DropdownMenuItem asChild>
+                                                <a
+                                                    href={`https://github.com/${repo}`}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                >
+                                                    <SourceIcon local={false} />
+                                                    Mở trên GitHub
+                                                </a>
+                                            </DropdownMenuItem>
+                                        )}
+                                    {repo !== null && (
+                                        <DropdownMenuItem
+                                            onSelect={() =>
+                                                setCodeOpen((open) => !open)
+                                            }
+                                        >
+                                            <Folder aria-hidden="true" />
+                                            Mã nguồn repo
+                                        </DropdownMenuItem>
+                                    )}
+                                </DropdownMenuContent>
+                            </DropdownMenu>
                             <Button
                                 type="button"
                                 variant="ghost"
@@ -1060,7 +1267,7 @@ export default function AiChatIndex({
                                 title="Thông tin phiên chat"
                                 onClick={toggleInfo}
                                 className={cn(
-                                    'size-8 text-muted-foreground',
+                                    'size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0',
                                     infoOpen &&
                                         'bg-accent text-accent-foreground',
                                 )}
@@ -1079,7 +1286,7 @@ export default function AiChatIndex({
                                         setBrowserOpen((open) => !open)
                                     }
                                     className={cn(
-                                        'size-8 text-muted-foreground',
+                                        'size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0',
                                         browserOpen &&
                                             'bg-accent text-accent-foreground',
                                     )}
@@ -1099,7 +1306,7 @@ export default function AiChatIndex({
                                         setTerminalOpen((open) => !open)
                                     }
                                     className={cn(
-                                        'size-8 text-muted-foreground',
+                                        'size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0',
                                         terminalOpen &&
                                             'bg-accent text-accent-foreground',
                                     )}
@@ -1114,7 +1321,7 @@ export default function AiChatIndex({
                                             asChild
                                             variant="ghost"
                                             size="icon"
-                                            className="size-8 text-muted-foreground"
+                                            className="size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0"
                                         >
                                             <a
                                                 href={`https://github.com/${repo}`}
@@ -1123,7 +1330,7 @@ export default function AiChatIndex({
                                                 aria-label={`Mở ${repo} trên GitHub`}
                                                 title={`Mở ${repo} trên GitHub`}
                                             >
-                                                <Globe aria-hidden="true" />
+                                                <SourceIcon local={false} />
                                             </a>
                                         </Button>
                                     )}
@@ -1138,7 +1345,7 @@ export default function AiChatIndex({
                                             setCodeOpen((open) => !open)
                                         }
                                         className={cn(
-                                            'size-8 text-muted-foreground',
+                                            'size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0',
                                             codeOpen &&
                                                 'bg-accent text-accent-foreground',
                                         )}
@@ -1160,8 +1367,6 @@ export default function AiChatIndex({
                                 proposals: undefined,
                             }))}
                             pending={false}
-                            userName={authUser.name}
-                            userAvatar={authUser.avatar}
                             assistant={assistantIdentity(
                                 settings,
                                 pickedAccount,
@@ -1170,6 +1375,7 @@ export default function AiChatIndex({
                         />
                     ) : (
                         <ChatPanel
+                            showProjects={recentsTab === 'projects'}
                             key={activeId ?? 'new'}
                             conversation={activeConversation}
                             initialMessages={messages}
@@ -1211,6 +1417,8 @@ export default function AiChatIndex({
                             mode={mode}
                             onModeChange={changeMode}
                             settings={settings}
+                            askRequest={askRequest}
+                            onPending={setPendingChat}
                         />
                     )}
                 </section>
@@ -1224,7 +1432,7 @@ export default function AiChatIndex({
                         }
                         dragging={viewerDragging}
                         label="Xem tệp"
-                        maxWidthClass="max-w-[min(70%,calc(100%-40rem))]"
+                        maxWidthClass="max-w-full"
                         panelRef={viewerPanel}
                         onKeyDown={(event) => {
                             if (event.key === 'Escape') {
@@ -1289,7 +1497,7 @@ export default function AiChatIndex({
                         width={infoWidth.width}
                         dragging={infoDragging}
                         label="Thông tin phiên chat"
-                        maxWidthClass="max-w-[40%]"
+                        maxWidthClass="max-w-full"
                     >
                         <ResizeHandle
                             label="Đổi độ rộng bảng thông tin"
@@ -1317,7 +1525,7 @@ export default function AiChatIndex({
                         width={terminalWidth.width}
                         dragging={terminalDragging}
                         label="Terminal"
-                        maxWidthClass="max-w-[40%]"
+                        maxWidthClass="max-w-full"
                     >
                         <ResizeHandle
                             label="Đổi độ rộng terminal"
@@ -1345,7 +1553,7 @@ export default function AiChatIndex({
                         width={browserWidth.width}
                         dragging={browserDragging}
                         label="Trình duyệt"
-                        maxWidthClass="max-w-[50%]"
+                        maxWidthClass="max-w-full"
                     >
                         <ResizeHandle
                             label="Đổi độ rộng trình duyệt"
@@ -1428,6 +1636,9 @@ export default function AiChatIndex({
                         onViewRepo={setViewedRepo}
                         changes={changes}
                         openRequest={openRequest}
+                        onAsk={(reference) =>
+                            setAskRequest({ id: Date.now(), reference })
+                        }
                     />
                 )}
             </div>

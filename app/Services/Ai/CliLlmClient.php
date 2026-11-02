@@ -33,7 +33,8 @@ final class CliLlmClient implements LlmClient
 
     public function complete(string $system, string $prompt): string
     {
-        [$command, $cliEnv] = CliRuntime::resolve($this->command());
+        $images = app(ChatImages::class)->paths();
+        [$command, $cliEnv] = CliRuntime::resolve($this->command($images));
         $directory = storage_path('app/ai-cli');
         File::ensureDirectoryExists($directory);
 
@@ -44,7 +45,7 @@ final class CliLlmClient implements LlmClient
             $result = Process::path($directory)
                 ->timeout(self::TIMEOUT_SECONDS)
                 ->env([...($this->sessionToken === null || $this->sessionToken === '' ? [] : [self::TOKEN_ENV[$this->vendor] => $this->sessionToken]), ...$cliEnv])
-                ->input($system."\n\n".$prompt)
+                ->input($system."\n\n".$prompt.$this->imageNote($images))
                 ->run($command);
         } catch (ProcessTimedOutException) {
             throw new AiException(AiException::TIMEOUT);
@@ -85,11 +86,26 @@ final class CliLlmClient implements LlmClient
     }
 
     /**
+     * Claude and Gemini read a picture by its path; Codex takes it as an `--image` argument instead, so only those two are told the paths.
+     *
+     * @param  list<string>  $images
+     */
+    private function imageNote(array $images): string
+    {
+        if ($images === [] || $this->vendor === 'openai') {
+            return '';
+        }
+
+        return "\n\nẢnh người dùng đính kèm (hãy mở từng ảnh bằng công cụ đọc tệp):\n".implode("\n", $images);
+    }
+
+    /**
+     * @param  list<string>  $images  absolute paths of the pictures of this message
      * @return list<string>
      *
      * @throws AiException
      */
-    private function command(): array
+    private function command(array $images = []): array
     {
         $model = filled($this->model) && preg_match(self::MODEL_PATTERN, $this->model) === 1 ? $this->model : null;
 
@@ -97,7 +113,7 @@ final class CliLlmClient implements LlmClient
             // * Print mode reads the prompt from stdin; the tools that edit files, run commands or reach the web are denied.
             'anthropic' => ['claude', '-p', '--output-format', 'text', '--disallowedTools', 'Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch', ...$this->mcpArguments(), ...($model === null ? [] : ['--model', $model])],
             // * `-` reads the prompt from stdin; the read-only sandbox blocks writes and commands that change anything.
-            'openai' => ['codex', 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', ...($model === null ? [] : ['--model', $model]), '-'],
+            'openai' => ['codex', 'exec', ...array_map(fn (string $path): string => '--image='.$path, $images), '--sandbox', 'read-only', '--skip-git-repo-check', ...($model === null ? [] : ['--model', $model]), '-'],
             // * The stdin text is appended to this fixed instruction.
             'google' => ['gemini', '-p', 'Trả lời đúng theo hướng dẫn và khối dữ liệu nhận qua stdin.', ...($model === null ? [] : ['--model', $model])],
             default => throw new AiException(AiException::CLI_UNSUPPORTED),

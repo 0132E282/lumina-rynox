@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Tests\Feature\Ai;
 
 use App\Services\Ai\AiException;
+use App\Services\Ai\ChatImages;
 use App\Services\Ai\CliLlmClient;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Process\Exceptions\ProcessTimedOutException;
 use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\Process;
@@ -97,5 +99,42 @@ class CliLlmClientTest extends TestCase
         $this->expectExceptionMessage(AiException::CLI_UNSUPPORTED);
 
         (new CliLlmClient('deepseek', self::TOKEN))->complete('s', 'p');
+    }
+
+    private function png(): UploadedFile
+    {
+        $path = tempnam(sys_get_temp_dir(), 'png');
+        file_put_contents($path, base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='));
+
+        return new UploadedFile($path, 'ảnh chụp.png', 'image/png', null, true);
+    }
+
+    public function test_pictures_reach_codex_as_image_arguments_and_claude_by_path_then_are_deleted(): void
+    {
+        Process::fake(['*' => Process::result('ok')]);
+        $images = $this->app->make(ChatImages::class);
+        $file = $this->png();
+
+        $this->assertTrue(ChatImages::isImage($file));
+        $path = $images->store($file);
+        $this->assertFileExists($path);
+        $this->assertStringNotContainsString('ảnh', $path);
+
+        (new CliLlmClient('openai', null))->complete('s', 'p');
+        (new CliLlmClient('anthropic', null))->complete('s', 'p');
+
+        Process::assertRan(fn (PendingProcess $process): bool => $process->command[0] === 'codex' && in_array('--image='.$path, $process->command, true));
+        Process::assertRan(fn (PendingProcess $process): bool => $process->command[0] === 'claude' && str_contains((string) $process->input, $path) && ! str_contains(implode(' ', $process->command), $path));
+
+        $images->clear();
+        $this->assertFileDoesNotExist($path);
+    }
+
+    public function test_a_non_image_named_png_is_not_accepted(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'fake');
+        file_put_contents($path, '<?php echo 1;');
+
+        $this->assertFalse(ChatImages::isImage(new UploadedFile($path, 'x.png', 'image/png', null, true)));
     }
 }

@@ -29,6 +29,8 @@ export default function MonacoDiff({
             options={{
                 ...READ_ONLY_OPTIONS,
                 renderSideBySide: false,
+                // * Removed lines are drawn inside the one editor (not in a separate box), so selecting text shows the highlight on them too.
+                experimental: { useTrueInlineView: true },
                 // * Only the changed lines and 3 around them, with line numbers, like a pull request.
                 hideUnchangedRegions: {
                     enabled: true,

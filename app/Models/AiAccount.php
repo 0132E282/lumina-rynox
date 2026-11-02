@@ -46,7 +46,14 @@ class AiAccount extends Model
             'claude-sonnet-5-5' => 'Sonnet 5.5',
             'claude-haiku-5-5' => 'Haiku 5.5',
         ],
+        'openai' => [
+            'gpt-5.6-luna' => 'GPT-5.6 Luna',
+            'gpt-5.6-terra' => 'GPT-5.6 Terra',
+        ],
     ];
+
+    // * Codex CLI signed in with a ChatGPT account refuses the model its own config may name (and any other it does not offer), so an account without a model asks for this one.
+    public const CODEX_CLI_MODEL = 'gpt-5.6-luna';
 
     public const PURPOSE_SUGGEST_REPLY = 'suggest_reply';
 

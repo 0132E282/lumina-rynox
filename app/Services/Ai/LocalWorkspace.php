@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Str;
 
 /**
@@ -23,6 +24,9 @@ class LocalWorkspace
     public const MAX_READ_BYTES = 1_000_000;
 
     public const MAX_WRITE_BYTES = 100_000;
+
+    /** * Most files the changes list shows. */
+    private const MAX_CHANGES = 300;
 
     public const MAX_TREE_ENTRIES = 2000;
 
@@ -513,6 +517,110 @@ class LocalWorkspace
         return $bytes;
     }
 
+    /**
+     * Files that differ from `HEAD` in the root's git working tree (read-only `git status`/`git diff`), without the files the deny list hides.
+     *
+     * @return array{git: bool, files: list<array{path: string, status: string, added: int|null, removed: int|null}>}
+     */
+    public function changes(string $rootId): array
+    {
+        $root = $this->rootPath($rootId);
+        $status = Process::path($root)->timeout(15)->run(['git', '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+
+        if (! $status->successful()) {
+            return ['git' => false, 'files' => []];
+        }
+
+        $counts = [];
+        $numstat = Process::path($root)->timeout(15)->run(['git', '--no-optional-locks', 'diff', 'HEAD', '--numstat', '-z']);
+
+        if ($numstat->successful()) {
+            foreach (explode("\0", $numstat->output()) as $row) {
+                if (preg_match('/^(\d+|-)\t(\d+|-)\t(.+)$/s', $row, $match) === 1) {
+                    $counts[$match[3]] = $match[1] === '-' ? [null, null] : [(int) $match[1], (int) $match[2]];
+                }
+            }
+        }
+
+        $files = [];
+        $entries = explode("\0", $status->output());
+
+        for ($index = 0; $index < count($entries) && count($files) < self::MAX_CHANGES; $index++) {
+            if (strlen($entries[$index]) < 4) {
+                continue;
+            }
+
+            $code = substr($entries[$index], 0, 2);
+            $path = substr($entries[$index], 3);
+
+            // * A rename or copy is followed by the old path.
+            if (str_contains($code, 'R') || str_contains($code, 'C')) {
+                $index++;
+            }
+
+            $relative = $this->normalise($path);
+
+            if ($relative === null || $this->denied($relative)) {
+                continue;
+            }
+
+            $kind = $code === '??' || str_contains($code, 'A') ? 'A' : (str_contains($code, 'D') ? 'D' : 'M');
+            [$added, $removed] = $counts[$path] ?? [null, null];
+
+            if ($code === '??') {
+                $added = $this->lineCount($root.DIRECTORY_SEPARATOR.$relative);
+                $removed = 0;
+            }
+
+            $files[] = ['path' => $relative, 'status' => $kind, 'added' => $added, 'removed' => $removed];
+        }
+
+        usort($files, fn (array $a, array $b): int => strcmp($a['path'], $b['path']));
+
+        return ['git' => true, 'files' => $files];
+    }
+
+    /** * The file as it is in `HEAD` (null for a file that is not in it), under the same guards as `read`. */
+    public function headContent(string $rootId, string $path): ?string
+    {
+        $relative = $this->allowedRelative($path);
+        $result = Process::path($this->rootPath($rootId))->timeout(15)->run(['git', 'show', 'HEAD:'.$relative]);
+
+        if (! $result->successful()) {
+            return null;
+        }
+
+        $content = $result->output();
+
+        if (strlen($content) > self::MAX_READ_BYTES) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::TOO_LARGE);
+        }
+
+        if (str_contains($content, "\0") || ! mb_check_encoding($content, 'UTF-8')) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::NOT_TEXT);
+        }
+
+        return $content;
+    }
+
+    /** * Lines of a small new text file, null when it is large, binary or unreadable. */
+    private function lineCount(string $full): ?int
+    {
+        $size = is_file($full) && ! is_link($full) ? filesize($full) : false;
+
+        if ($size === false || $size > self::MAX_READ_BYTES) {
+            return null;
+        }
+
+        $content = file_get_contents($full);
+
+        if ($content === false || str_contains($content, "\0")) {
+            return null;
+        }
+
+        return $content === '' ? 0 : substr_count($content, "\n") + (str_ends_with($content, "\n") ? 0 : 1);
+    }
+
     /** * Hash of the file's current content, or null when it does not exist (a new file). */
     public function currentHash(string $rootId, string $path): ?string
     {
@@ -585,6 +693,8 @@ class LocalWorkspace
     public function context(string $rootId, string $message): string
     {
         ['paths' => $paths] = $this->tree($rootId);
+        $activity = app(ChatActivity::class);
+        $activity->record('tree', "local {$rootId}", count($paths).' tệp');
         $sections = ["Thư mục local: {$rootId}\nCác tệp (tối đa 300):\n".implode("\n", array_slice($paths, 0, 300))];
         $named = 0;
 
@@ -606,6 +716,7 @@ class LocalWorkspace
             // * Same tag cleaning as every other data block: the file cannot close its own block.
             $clean = preg_replace('/<\/?\s*[a-z_]*_data\b[^>]*>/iu', '', mb_substr($content, 0, 8000)) ?? '';
             $sections[] = "<file_data path=\"{$path}\">\n{$clean}\n</file_data>";
+            $activity->record('file', "local {$rootId}", $path);
             $named++;
         }
 

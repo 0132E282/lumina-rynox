@@ -221,6 +221,16 @@ export function AiAccountDialog({
                     >
                         Huỷ
                     </Button>
+                    {cliVendor !== null && cli.state === 'in' && (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => void cli.login()}
+                            disabled={submitting}
+                        >
+                            Đăng nhập lại
+                        </Button>
+                    )}
                     <Button
                         type="button"
                         onClick={() => void primary()}
@@ -232,7 +242,7 @@ export function AiAccountDialog({
                     >
                         {loggingIn
                             ? 'Đang đăng nhập…'
-                            : cliVendor !== null
+                            : cliVendor !== null && cli.state !== 'in'
                               ? 'Đăng nhập'
                               : 'Lưu'}
                     </Button>

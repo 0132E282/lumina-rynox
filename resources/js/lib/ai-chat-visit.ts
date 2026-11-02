@@ -11,3 +11,6 @@ export const OPEN_CONVERSATION_VISIT: {
     preserveScroll: true,
     only: ['activeConversation', 'messages'],
 };
+
+/** * Id of the chat that is still being created (not saved yet): listed under its project, not openable. */
+export const PENDING_CHAT_ID = 'pending';

@@ -1,11 +1,10 @@
-import { Image as ImageIcon } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import type { ComponentProps } from 'react';
+import { doneTyping, isTyping } from '@/lib/typing';
 import { ProposalText } from '@/components/ai-chat/proposal-text';
 import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { asksForImage } from '@/lib/image-request';
-import { useInitials } from '@/hooks/use-initials';
 import { ProposalCard } from '@/components/ai-chat/proposal-card';
 import type { AiChatMessage, AiChatProposal } from '@/types';
 import { cn } from '@/lib/utils';
@@ -19,6 +18,46 @@ export type ThreadItem = {
 };
 
 const THINKING_AFTER_SECONDS = 2;
+
+/** * Shows `content` as if typed: a few characters per tick, the whole answer in about 3 seconds at most. Nothing is animated for reduced motion or an answer already shown. */
+function useTyped(id: number | string, content: string): string {
+    const [typed, setTyped] = useState(() =>
+        isTyping(id) &&
+        !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            ? 0
+            : content.length,
+    );
+
+    useEffect(() => {
+        if (typed >= content.length) {
+            doneTyping(id);
+
+            return;
+        }
+
+        const step = Math.max(2, Math.ceil(content.length / 120));
+        const timer = window.setTimeout(
+            () => setTyped((current) => current + step),
+            25,
+        );
+
+        return () => window.clearTimeout(timer);
+    }, [typed, content.length, id]);
+
+    return typed >= content.length ? content : content.slice(0, typed);
+}
+
+/** * One answer of the assistant; types itself in when it has just arrived. */
+function TypedProposalText({
+    id,
+    content,
+    ...rest
+}: { id: number | string; content: string } & Omit<
+    ComponentProps<typeof ProposalText>,
+    'content'
+>) {
+    return <ProposalText content={useTyped(id, content)} {...rest} />;
+}
 
 /** * Real request state only (the backend is synchronous, no streaming): "sending" at first, then "thinking" with elapsed seconds. Mounted only while pending, so the timer restarts for each send. */
 function PendingStatus({
@@ -60,15 +99,6 @@ function PendingStatus({
                     {name}
                 </span>
                 <span className="sr-only">{name}: </span>
-                {imageRequest && (
-                    // * Placeholder frame for the picture: decorative, shimmers only without reduced motion.
-                    <span
-                        aria-hidden="true"
-                        className="mb-2 flex size-24 items-center justify-center rounded-lg border border-dashed bg-muted/50 text-muted-foreground motion-safe:animate-pulse"
-                    >
-                        <ImageIcon className="size-6" />
-                    </span>
-                )}
                 <span className="flex items-center gap-2 text-muted-foreground">
                     {/* * Typing dots: decorative, still when the person prefers reduced motion. */}
                     <span
@@ -83,11 +113,7 @@ function PendingStatus({
                             />
                         ))}
                     </span>
-                    <span
-                        className={cn(
-                            imageRequest && 'motion-safe:animate-pulse',
-                        )}
-                    >
+                    <span>
                         {imageRequest
                             ? 'Đang tạo ảnh…'
                             : thinking
@@ -98,22 +124,19 @@ function PendingStatus({
                         <span className="tabular-nums">{seconds}s</span>
                     )}
                 </span>
+                {imageRequest && (
+                    // * Placeholder frame for the picture: a dot grid with drifting bright patches and a progress estimate (the real time is unknown, so it eases toward 95%).
+                    <span
+                        aria-hidden="true"
+                        className="pm-dots relative mt-2 block aspect-square w-[min(32rem,calc(100vw-8rem))] overflow-hidden rounded-xl"
+                    >
+                        <span className="absolute right-3 bottom-3 rounded-full border bg-background px-3 py-1 text-sm font-medium text-blue-700 tabular-nums shadow-sm dark:text-blue-300">
+                            {Math.round(95 * (1 - Math.exp(-seconds / 25)))}%
+                        </span>
+                    </span>
+                )}
             </div>
         </div>
-    );
-}
-
-/** * Small decorative avatars at the start of a message; hidden on very narrow screens. */
-function UserAvatar({ name, avatar }: { name?: string; avatar?: string }) {
-    const getInitials = useInitials();
-
-    return (
-        <Avatar aria-hidden="true" className="hidden size-7 sm:flex">
-            <AvatarImage src={avatar} alt="" />
-            <AvatarFallback className="bg-neutral-200 text-xs text-black dark:bg-neutral-700 dark:text-white">
-                {getInitials(name ?? '')}
-            </AvatarFallback>
-        </Avatar>
     );
 }
 
@@ -124,8 +147,6 @@ export function ChatThread({
     onProposalsChange,
     onOpenFile,
     onChoose,
-    userName,
-    userAvatar,
     assistant,
 }: {
     items: ThreadItem[];
@@ -139,8 +160,6 @@ export function ChatThread({
     /** Sends a picked ```choices option as the next user message; without it the cards stay read-only. */
     onChoose?: (text: string) => void;
     /** Decorative avatars: the signed-in person's name/photo and the AI account's vendor. */
-    userName?: string;
-    userAvatar?: string;
     assistant?: AssistantIdentity;
 }) {
     const scrollerRef = useRef<HTMLDivElement>(null);
@@ -200,9 +219,8 @@ export function ChatThread({
 
     return (
         <div
-            // * pt-12: the floating toolbar (terminal, GitHub, code) sits in the top corners; the thread scrolls below it, not under it.
             // * relative: the screen-reader-only spans inside are absolutely positioned; without a positioned scroller they would stretch the page behind it.
-            className="relative flex min-h-0 flex-1 flex-col overflow-y-auto pt-12"
+            className="relative flex min-h-0 flex-1 flex-col overflow-y-auto"
             aria-live="polite"
             ref={scrollerRef}
             onScroll={(event) => {
@@ -265,7 +283,8 @@ export function ChatThread({
                                     </span>
                                 )}
                                 {item.role === 'assistant' ? (
-                                    <ProposalText
+                                    <TypedProposalText
+                                        id={item.id}
                                         content={item.content}
                                         hasCard={
                                             (item.proposals?.length ?? 0) > 0
@@ -294,12 +313,6 @@ export function ChatThread({
                                     item.content
                                 )}
                             </div>
-                            {item.role === 'user' && (
-                                <UserAvatar
-                                    name={userName}
-                                    avatar={userAvatar}
-                                />
-                            )}
                         </div>
                         {item.role === 'assistant' &&
                             typeof item.id === 'number' &&

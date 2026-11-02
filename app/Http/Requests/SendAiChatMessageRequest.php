@@ -6,6 +6,7 @@ namespace App\Http\Requests;
 
 use App\Services\Ai\AiAssistant;
 use App\Services\Ai\ChatAttachmentReader;
+use App\Services\Ai\ChatImages;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -19,7 +20,7 @@ class SendAiChatMessageRequest extends FormRequest
     /** Read-only repos / local folders that may join the chosen project in one message. */
     public const MAX_EXTRA_SOURCES = 3;
 
-    public const MAX_ATTACHMENT_KB = 2048;
+    public const MAX_ATTACHMENT_KB = 5120;
 
     public function authorize(): bool
     {
@@ -43,7 +44,7 @@ class SendAiChatMessageRequest extends FormRequest
             'extra_local_roots' => ['nullable', 'array', 'max:'.self::MAX_EXTRA_SOURCES],
             'extra_local_roots.*' => ['string', 'regex:/^[a-z0-9_-]{1,40}$/', 'distinct'],
             'attachments' => ['nullable', 'array', 'max:'.self::MAX_ATTACHMENTS],
-            'attachments.*' => ['file', 'max:'.self::MAX_ATTACHMENT_KB, 'extensions:'.implode(',', ChatAttachmentReader::extensions())],
+            'attachments.*' => ['file', 'max:'.self::MAX_ATTACHMENT_KB, 'extensions:'.implode(',', [...ChatAttachmentReader::extensions(), ...ChatImages::EXTENSIONS])],
         ];
     }
 

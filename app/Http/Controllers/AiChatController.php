@@ -15,7 +15,9 @@ use App\Services\Ai\AiAssistant;
 use App\Services\Ai\AiException;
 use App\Services\Ai\AiUsageStats;
 use App\Services\Ai\ApiLlmClient;
+use App\Services\Ai\ChatActivity;
 use App\Services\Ai\ChatAttachmentReader;
+use App\Services\Ai\ChatImages;
 use App\Services\Ai\EditProposalExtractor;
 use App\Services\Ai\GithubException;
 use App\Services\Ai\GithubReader;
@@ -123,6 +125,39 @@ class AiChatController extends Controller
             ->map(fn (AiConversation $conversation): array => $this->conversationPayload($conversation))->all());
     }
 
+    /** * Deletes one of the signed-in admin's threads with its messages and edit proposals (cascade); another admin's thread is a 404. */
+    public function destroyConversation(Request $request, string $conversation): RedirectResponse
+    {
+        $user = $request->user();
+
+        AiConversation::query()->ownedBy($user)->where('uuid', $conversation)->firstOrFail()->delete();
+        Cache::forget(self::recentsCacheKey($user->id));
+
+        return redirect()->route('home');
+    }
+
+    /** * Deletes every thread of one list: `chat` (no project), `code` (with a project) or `repo` (one project's threads). Only the signed-in admin's own threads. */
+    public function destroyConversations(Request $request): RedirectResponse
+    {
+        $user = $request->user();
+        $data = $request->validate([
+            'scope' => ['required', 'in:chat,code,repo'],
+            'repo' => ['required_if:scope,repo', 'string', 'max:140', 'regex:#^(?:local:[a-z0-9_-]{1,40}|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$#'],
+        ]);
+
+        $query = AiConversation::query()->ownedBy($user);
+
+        match ($data['scope']) {
+            'chat' => $query->whereNull('repo'),
+            'code' => $query->whereNotNull('repo'),
+            'repo' => $query->where('repo', $data['repo']),
+        };
+        $query->delete();
+        Cache::forget(self::recentsCacheKey($user->id));
+
+        return redirect()->route('home');
+    }
+
     /** * Repos the saved GitHub token can read (for the picker under the chat box). Names and flags only. */
     public function repos(): JsonResponse
     {
@@ -219,6 +254,16 @@ class AiChatController extends Controller
         $where = [];
 
         foreach ($files as $file) {
+            // * A picture goes to the CLI as a file (for this request only); it has no text to read.
+            if (ChatImages::isImage($file)) {
+                app(ChatImages::class)->store($file);
+                app(ChatActivity::class)->record('image', 'đính kèm', $file->getClientOriginalName());
+                $sections[] = 'Ảnh đính kèm: '.$file->getClientOriginalName().' (gửi kèm cho AI)';
+                $notes[] = '🖼 '.$file->getClientOriginalName();
+
+                continue;
+            }
+
             $content = $this->attachments->read($file);
 
             if ($content === null) {
@@ -226,6 +271,7 @@ class AiChatController extends Controller
             }
 
             $sections[] = 'Tệp đính kèm: '.$file->getClientOriginalName()."\n".$content;
+            app(ChatActivity::class)->record('attachment', 'đính kèm', $file->getClientOriginalName());
             $notes[] = '📎 '.$file->getClientOriginalName();
         }
 
@@ -343,6 +389,8 @@ class AiChatController extends Controller
             'user_message' => $this->messagePayload($userMessage),
             'assistant_message' => $this->messagePayload($assistantMessage->load('proposals')),
             'auto_pr_error' => $autoPrError,
+            // * What the app read for this answer (names and counts only), shown in the agent popup.
+            'activity' => app(ChatActivity::class)->all(),
         ]);
     }
 

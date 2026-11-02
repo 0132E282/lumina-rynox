@@ -521,7 +521,10 @@ class AiAssistant
     private function attempt(AiAccount $account, string $system, string $prompt, ?string $model, ?string $purpose = null): string
     {
         try {
-            $text = $this->client($account, $model)->complete($system, $prompt);
+            $client = $this->client($account, $model);
+            // * Only a CLI can be handed the pictures of this message: an API answer is told so, instead of silently answering as if there were none.
+            $note = ! $client instanceof CliLlmClient && app(ChatImages::class)->paths() !== [] ? "\n\n(Người dùng có đính kèm ảnh nhưng tài khoản AI này không xem được ảnh.)" : '';
+            $text = $client->complete($system, $prompt.$note);
         } catch (AiException $exception) {
             $this->record($account, 'error', $exception->getMessage());
             $this->logUsage($account, $purpose, $model, $exception->getMessage() === AiException::QUOTA ? AiUsageLog::STATUS_QUOTA : AiUsageLog::STATUS_ERROR, $exception->kind(), $this->estimateTokens($system.$prompt), null, $exception->limit);
@@ -577,6 +580,8 @@ class AiAssistant
 
         // * No token on a CLI account means "use the CLI's own login on this machine".
         if ($account->auth_type === AiAccount::AUTH_SESSION) {
+            $model ??= $account->vendor === 'openai' ? AiAccount::CODEX_CLI_MODEL : null;
+
             return new CliLlmClient($account->vendor, $token, $model);
         }
 

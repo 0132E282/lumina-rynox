@@ -1,16 +1,16 @@
-import { Link, usePage } from '@inertiajs/react';
+import { Link, router } from '@inertiajs/react';
 import { vendorShortName } from '@/lib/ai-account';
 import {
     ChartColumn,
     MessageSquare,
     MoreVertical,
     PanelLeft,
+    Plus,
     Search,
     Settings,
-    SquarePen,
+    Trash2,
 } from 'lucide-react';
 import { memo, useState } from 'react';
-import { filterNavItems } from '@/components/nav-main';
 import { OPEN_CONVERSATION_VISIT } from '@/lib/ai-chat-visit';
 import { home } from '@/routes';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,8 @@ import {
     Dialog,
     DialogContent,
     DialogDescription,
+    DialogFooter,
+    DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
 import { ProjectsTab } from '@/components/ai-chat/projects-tab';
@@ -25,10 +27,29 @@ import { RowActionsMenu } from '@/components/tables/row-actions-menu';
 import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { Input } from '@/components/ui/input';
-import type { NavigationConfig } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
 import { groupByDay } from '@/lib/relative-time';
 import type { AiChatAccount, AiChatConversation } from '@/types';
+
+/** * Three dots that rise one after another: this conversation is being answered. */
+function WorkingDots() {
+    return (
+        <span
+            role="status"
+            aria-label="Đang làm việc"
+            className="flex shrink-0 items-end gap-0.5 pb-0.5"
+        >
+            {[0, 1, 2].map((dot) => (
+                <span
+                    key={dot}
+                    aria-hidden="true"
+                    style={{ animationDelay: `${dot * 150}ms` }}
+                    className="size-1 animate-bounce rounded-full bg-current motion-reduce:animate-none"
+                />
+            ))}
+        </span>
+    );
+}
 
 const STATUS_LABELS: Record<string, string> = {
     connected: 'Đã kết nối',
@@ -41,6 +62,7 @@ export type RecentsTab = 'chat' | 'projects';
 
 export const RecentsList = memo(function RecentsList({
     conversations,
+    runningIds,
     aiAccounts,
     assistant,
     account,
@@ -56,6 +78,8 @@ export const RecentsList = memo(function RecentsList({
     onOpenStats,
 }: {
     conversations: AiChatConversation[];
+    /** * Conversations an agent is answering in right now: their row shows animated dots. */
+    runningIds: Set<string>;
     aiAccounts: AiChatAccount[];
     /** * The assistant's name and avatar (the character), shown in the footer row. */
     assistant: AssistantIdentity;
@@ -75,10 +99,14 @@ export const RecentsList = memo(function RecentsList({
     /** * Opens the "Thống kê AI" dialog. */
     onOpenStats: () => void;
 }) {
-    const { navigation } = usePage<{ navigation: NavigationConfig }>().props;
     const [search, setSearch] = useState('');
     const [searchOpen, setSearchOpen] = useState(false);
     const [filter, setFilter] = useState('');
+    // * What the confirm dialog is about to delete: one thread, or every thread of the Chat list.
+    const [pendingDelete, setPendingDelete] = useState<
+        AiChatConversation | 'all' | null
+    >(null);
+    const [deleting, setDeleting] = useState(false);
     // * Chat and Code chats are two separate things: the Chat tab (and its search) holds the chats without a repo, the Code tab those with one.
     const scoped = conversations.filter((conversation) =>
         tab === 'projects'
@@ -86,22 +114,32 @@ export const RecentsList = memo(function RecentsList({
             : conversation.repo === null,
     );
     const query = search.trim().toLowerCase();
-    const menuResults = query
-        ? filterNavItems(
-              navigation.main.flatMap((group) =>
-                  group.items.map(({ title, url }) => ({ title, url })),
-              ),
-              search,
-          )
-        : [];
+    // * Search covers both lists (Chat and Code), whichever tab is open.
     const chatResults = query
-        ? scoped.filter((conversation) =>
+        ? conversations.filter((conversation) =>
               conversation.title.toLowerCase().includes(query),
           )
-        : scoped;
+        : conversations;
     const recents = conversations.filter((conversation) =>
         conversation.title.toLowerCase().includes(filter.trim().toLowerCase()),
     );
+    const confirmDelete = () => {
+        if (pendingDelete === null) {
+            return;
+        }
+
+        const url =
+            pendingDelete === 'all'
+                ? '/ai-chat/conversations?scope=chat'
+                : `/ai-chat/conversations/${pendingDelete.id}`;
+
+        setDeleting(true);
+        router.delete(url, {
+            preserveScroll: true,
+            onSuccess: () => setPendingDelete(null),
+            onFinish: () => setDeleting(false),
+        });
+    };
     const closeSearch = () => {
         setSearchOpen(false);
         setSearch('');
@@ -186,7 +224,7 @@ export const RecentsList = memo(function RecentsList({
                 >
                     <DialogTitle className="sr-only">Tìm kiếm</DialogTitle>
                     <DialogDescription className="sr-only">
-                        Tìm cuộc trò chuyện và mục menu.
+                        Tìm cuộc trò chuyện trong Chat và Code.
                     </DialogDescription>
                     <div className="relative border-b">
                         <Search
@@ -197,57 +235,67 @@ export const RecentsList = memo(function RecentsList({
                             autoFocus
                             value={search}
                             onChange={(event) => setSearch(event.target.value)}
-                            aria-label="Tìm cuộc trò chuyện và menu"
-                            placeholder="Tìm cuộc trò chuyện và menu..."
+                            aria-label="Tìm cuộc trò chuyện"
+                            placeholder="Tìm cuộc trò chuyện..."
                             className="h-14 rounded-none border-0 pr-12 pl-11 shadow-none focus-visible:ring-0"
                         />
                     </div>
                     <div className="flex min-h-0 flex-col gap-1 overflow-y-auto p-2">
-                        {chatResults.length === 0 &&
-                            menuResults.length === 0 && (
-                                <p className="px-3 py-6 text-center text-sm text-muted-foreground">
-                                    Không tìm thấy kết quả phù hợp.
-                                </p>
-                            )}
-                        {chatResults.map((conversation) => (
-                            <Link
-                                key={conversation.id}
-                                href={home.url({
-                                    query: { c: conversation.id },
-                                })}
-                                {...OPEN_CONVERSATION_VISIT}
-                                onClick={() => {
-                                    closeSearch();
-                                    onNavigate?.();
-                                }}
-                                className={resultClass}
-                            >
-                                <MessageSquare
-                                    aria-hidden="true"
-                                    className="size-4 shrink-0 text-muted-foreground"
-                                />
-                                <span className="truncate">
-                                    {conversation.title}
-                                </span>
-                            </Link>
-                        ))}
-                        {menuResults.map((item) => (
-                            <Link
-                                key={item.url}
-                                href={item.url}
-                                onClick={() => {
-                                    closeSearch();
-                                    onNavigate?.();
-                                }}
-                                className={resultClass}
-                            >
-                                <Search
-                                    aria-hidden="true"
-                                    className="size-4 shrink-0 text-muted-foreground"
-                                />
-                                <span className="truncate">{item.title}</span>
-                            </Link>
-                        ))}
+                        {chatResults.length === 0 && (
+                            <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                                Không tìm thấy kết quả phù hợp.
+                            </p>
+                        )}
+                        {[
+                            {
+                                label: 'Chat',
+                                items: chatResults.filter(
+                                    (conversation) =>
+                                        conversation.repo === null,
+                                ),
+                            },
+                            {
+                                label: 'Code',
+                                items: chatResults.filter(
+                                    (conversation) =>
+                                        conversation.repo !== null,
+                                ),
+                            },
+                        ]
+                            .filter((group) => group.items.length > 0)
+                            .map((group) => (
+                                <section
+                                    key={group.label}
+                                    aria-label={group.label}
+                                    className="flex flex-col gap-0.5"
+                                >
+                                    <h3 className="px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">
+                                        {group.label}
+                                    </h3>
+                                    {group.items.map((conversation) => (
+                                        <Link
+                                            key={conversation.id}
+                                            href={home.url({
+                                                query: { c: conversation.id },
+                                            })}
+                                            {...OPEN_CONVERSATION_VISIT}
+                                            onClick={() => {
+                                                closeSearch();
+                                                onNavigate?.();
+                                            }}
+                                            className={resultClass}
+                                        >
+                                            <MessageSquare
+                                                aria-hidden="true"
+                                                className="size-4 shrink-0 text-muted-foreground"
+                                            />
+                                            <span className="truncate">
+                                                {conversation.title}
+                                            </span>
+                                        </Link>
+                                    ))}
+                                </section>
+                            ))}
                     </div>
                 </DialogContent>
             </Dialog>
@@ -271,17 +319,36 @@ export const RecentsList = memo(function RecentsList({
                     />
                 ) : (
                     <>
-                        <Button
-                            asChild
-                            variant="outline"
-                            className="justify-start"
-                            onClick={onNavigate}
-                        >
-                            <Link href={home.url()}>
-                                <SquarePen aria-hidden="true" />
-                                Cuộc trò chuyện mới
+                        <div className="flex items-center gap-1">
+                            {/* * Same row as "Cuộc trò chuyện mới" under a project of the Code tab. */}
+                            <Link
+                                href={home.url()}
+                                onClick={onNavigate}
+                                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
+                            >
+                                <Plus
+                                    aria-hidden="true"
+                                    className="size-3.5 shrink-0"
+                                />
+                                <span className="truncate">
+                                    Cuộc trò chuyện mới
+                                </span>
                             </Link>
-                        </Button>
+                            {scoped.length > 0 && (
+                                // * Icon only, so "Cuộc trò chuyện mới" keeps its whole name.
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label="Xoá tất cả cuộc trò chuyện"
+                                    title="Xoá tất cả"
+                                    onClick={() => setPendingDelete('all')}
+                                    className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                                >
+                                    <Trash2 aria-hidden="true" />
+                                </Button>
+                            )}
+                        </div>
                         {scoped.length === 0 ? (
                             <>
                                 <h2 className="px-2 text-sm font-medium text-foreground/70">
@@ -307,7 +374,10 @@ export const RecentsList = memo(function RecentsList({
                                         </h2>
                                         <ul className="flex flex-col gap-0.5">
                                             {group.items.map((conversation) => (
-                                                <li key={conversation.id}>
+                                                <li
+                                                    key={conversation.id}
+                                                    className="group relative"
+                                                >
                                                     <Link
                                                         href={home.url({
                                                             query: {
@@ -323,14 +393,41 @@ export const RecentsList = memo(function RecentsList({
                                                                 : undefined
                                                         }
                                                         className={cn(
-                                                            'block truncate rounded-sm px-2 py-2 text-sm font-medium transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
+                                                            'block truncate rounded-sm px-2 py-2 pr-9 text-sm font-medium transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
                                                             conversation.id ===
                                                                 activeId &&
                                                                 'bg-accent text-accent-foreground',
                                                         )}
                                                     >
-                                                        {conversation.title}
+                                                        {runningIds.has(
+                                                            conversation.id,
+                                                        ) ? (
+                                                            <span className="flex items-center gap-1">
+                                                                <span className="truncate">
+                                                                    {
+                                                                        conversation.title
+                                                                    }
+                                                                </span>
+                                                                <WorkingDots />
+                                                            </span>
+                                                        ) : (
+                                                            conversation.title
+                                                        )}
                                                     </Link>
+                                                    <Button
+                                                        type="button"
+                                                        variant="ghost"
+                                                        size="icon"
+                                                        aria-label={`Xoá cuộc trò chuyện ${conversation.title}`}
+                                                        onClick={() =>
+                                                            setPendingDelete(
+                                                                conversation,
+                                                            )
+                                                        }
+                                                        className="absolute top-1/2 right-1 size-7 -translate-y-1/2 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-destructive"
+                                                    >
+                                                        <Trash2 aria-hidden="true" />
+                                                    </Button>
                                                 </li>
                                             ))}
                                         </ul>
@@ -417,6 +514,43 @@ export const RecentsList = memo(function RecentsList({
                     ]}
                 />
             </section>
+            <Dialog
+                open={pendingDelete !== null}
+                onOpenChange={(open) => !open && setPendingDelete(null)}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {pendingDelete === 'all'
+                                ? 'Xoá tất cả cuộc trò chuyện?'
+                                : 'Xoá cuộc trò chuyện?'}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {pendingDelete === 'all'
+                                ? `${scoped.length} cuộc trò chuyện trong mục Chat sẽ bị xoá vĩnh viễn cùng tin nhắn và đề xuất sửa tệp. Không hoàn tác được.`
+                                : 'Cuộc trò chuyện sẽ bị xoá vĩnh viễn cùng tin nhắn và đề xuất sửa tệp. Không hoàn tác được.'}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setPendingDelete(null)}
+                            disabled={deleting}
+                        >
+                            Huỷ
+                        </Button>
+                        <Button
+                            type="button"
+                            variant="destructive"
+                            onClick={confirmDelete}
+                            disabled={deleting}
+                        >
+                            Xoá
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </nav>
     );
 });

@@ -16,6 +16,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { useAppForm } from '@/hooks/use-app-form';
 import { api } from '@/lib/api';
+import { SourceIcon } from '@/components/ai-chat/source-icon';
 import { pickFolder } from '@/lib/pick-folder';
 import { cn } from '@/lib/utils';
 import type { AiChatRepo } from '@/types';
@@ -218,7 +219,7 @@ export function LocalProjectDialog({
             <DialogContent
                 // * The first tab would take the focus ring on open; the person types or ticks next.
                 onOpenAutoFocus={(event) => event.preventDefault()}
-                className="max-h-[min(90vh,44rem)] overflow-y-auto sm:max-w-3xl"
+                className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
             >
                 <DialogHeader>
                     <DialogTitle>{title}</DialogTitle>
@@ -296,7 +297,7 @@ export function LocalProjectDialog({
                                         placeholder="Tìm repo..."
                                         className="rounded-none border-0 border-b shadow-none focus-visible:ring-0"
                                     />
-                                    <ul className="flex max-h-72 flex-col gap-0.5 overflow-y-auto p-1">
+                                    <ul className="flex max-h-[min(55vh,30rem)] min-h-40 flex-col gap-0.5 overflow-y-auto p-1">
                                         {githubRepos
                                             .filter((row) =>
                                                 row.full_name
@@ -326,6 +327,10 @@ export function LocalProjectDialog({
                                                                     row.full_name,
                                                                 )
                                                             }
+                                                        />
+                                                        <SourceIcon
+                                                            local={false}
+                                                            className="text-muted-foreground"
                                                         />
                                                         <span className="truncate">
                                                             {row.full_name}
@@ -364,62 +369,6 @@ export function LocalProjectDialog({
                     </div>
                 ) : (
                     <>
-                        {localRoots.length > 0 && (
-                            <section
-                                aria-label="Thư mục đã có"
-                                className="flex flex-col gap-2"
-                            >
-                                <h3 className="text-sm font-medium">
-                                    Thư mục đã có
-                                </h3>
-                                <ul className="flex max-h-48 flex-col gap-0.5 overflow-y-auto">
-                                    {localRoots.map((root) => {
-                                        const id = `local:${root.id}`;
-
-                                        return (
-                                            <li key={root.id}>
-                                                <label className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-sm hover:bg-accent hover:text-accent-foreground">
-                                                    <Checkbox
-                                                        checked={ticked.includes(
-                                                            id,
-                                                        )}
-                                                        disabled={
-                                                            !ticked.includes(
-                                                                id,
-                                                            ) &&
-                                                            ticked.length >=
-                                                                MAX_REPOS
-                                                        }
-                                                        onCheckedChange={() =>
-                                                            toggleRepo(id)
-                                                        }
-                                                    />
-                                                    <span className="truncate">
-                                                        {root.label}
-                                                    </span>
-                                                </label>
-                                            </li>
-                                        );
-                                    })}
-                                </ul>
-                                <DialogFooter>
-                                    <Button
-                                        type="button"
-                                        className="rounded-full"
-                                        disabled={
-                                            ticked.length === 0 &&
-                                            selected.length === 0
-                                        }
-                                        onClick={confirmPick}
-                                    >
-                                        {pickLabel}
-                                    </Button>
-                                </DialogFooter>
-                                <h3 className="pt-2 text-sm font-medium">
-                                    Tạo dự án mới
-                                </h3>
-                            </section>
-                        )}
                         <Form
                             form={form}
                             withFieldGroup={false}

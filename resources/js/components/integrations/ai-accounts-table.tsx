@@ -1,25 +1,105 @@
 import type { ColumnDef } from '@tanstack/react-table';
-import { Plus } from 'lucide-react';
+import { CircleAlert, CircleCheck, CircleOff, Plus, Power } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { RowActionsMenu } from '@/components/tables/row-actions-menu';
 import { AccountLimit } from '@/components/integrations/account-limit';
 import { DataTable } from '@/components/tables/data-table';
 import { DataTableColumnHeader } from '@/components/tables/data-table-column-header';
 import { Button } from '@/components/ui/button';
+import {
+    Tooltip,
+    TooltipContent,
+    TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { formatDateTime } from '@/lib/utils';
 import type { AiAccountSummary, AiOptions } from '@/types';
 
 const STATUS_LABEL: Record<AiAccountSummary['status'], string> = {
-    connected: 'Hoạt động',
-    error: 'Lỗi',
+    connected: 'Đã kết nối',
+    error: 'Kết nối lỗi',
     disconnected: 'Chưa kết nối',
 };
 
-const STATUS_STYLE: Record<AiAccountSummary['status'], string> = {
-    connected: 'bg-secondary text-foreground',
-    error: 'bg-destructive text-white',
-    disconnected: 'bg-muted text-muted-foreground',
+const STATUS_ICON: Record<AiAccountSummary['status'], LucideIcon> = {
+    connected: CircleCheck,
+    error: CircleAlert,
+    disconnected: CircleOff,
 };
+
+const STATUS_STYLE: Record<AiAccountSummary['status'], string> = {
+    connected: 'text-emerald-600',
+    error: 'text-destructive',
+    disconnected: 'text-muted-foreground',
+};
+
+const CLI_NAME: Record<string, string> = {
+    anthropic: 'claude',
+    openai: 'codex',
+    google: 'gemini',
+};
+
+// * A generated name ends with the token type ("OpenAI / Codex · Session token 2"): a CLI account shows as "codex CLI" like "claude CLI", an API one drops the suffix.
+const shortName = (account: AiAccountSummary) => {
+    const generated = / · (?:API token|Session token)(?= \d+$|$)/;
+
+    if (!generated.test(account.name)) {
+        return account.name;
+    }
+
+    return account.auth_type === 'session_token' && CLI_NAME[account.vendor]
+        ? `${CLI_NAME[account.vendor]} CLI`
+        : account.name.replace(generated, '');
+};
+
+/** * Status as text; only a failed connection shows a tooltip, with the provider's error. */
+function StatusText({ account }: { account: AiAccountSummary }) {
+    const label = account.enabled
+        ? STATUS_LABEL[account.status]
+        : 'Không hoạt động';
+    const Icon = account.enabled ? STATUS_ICON[account.status] : Power;
+    const error =
+        account.enabled && account.status === 'error'
+            ? account.last_error
+            : null;
+
+    const color = account.enabled
+        ? STATUS_STYLE[account.status]
+        : 'text-muted-foreground';
+    const content = (
+        <>
+            <Icon aria-hidden="true" className="size-4 shrink-0" />
+            {label}
+        </>
+    );
+
+    // * Only a failed connection has something more to say, so only it gets a tooltip.
+    if (!error) {
+        return (
+            <span
+                className={`inline-flex items-center gap-1.5 text-sm font-medium ${color}`}
+            >
+                {content}
+            </span>
+        );
+    }
+
+    return (
+        <Tooltip>
+            <TooltipTrigger asChild>
+                <button
+                    type="button"
+                    className={`inline-flex items-center gap-1.5 rounded-sm text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none ${color}`}
+                >
+                    {content}
+                </button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+                <p>{error}</p>
+            </TooltipContent>
+        </Tooltip>
+    );
+}
 
 /** * AI accounts, one row each, on the shared DataTable; the token column only ever shows the stored mask. */
 export function AiAccountsTable({
@@ -53,13 +133,13 @@ export function AiAccountsTable({
                 <DataTableColumnHeader column={column} title="Tài khoản" />
             ),
             cell: ({ row }) => (
-                <div className="flex items-center gap-3 whitespace-normal">
+                <div className="flex min-w-64 items-center gap-3 whitespace-normal">
                     <VendorBadge
                         vendorKey={row.original.vendor}
                         fallback={labelOf(options.vendors, row.original.vendor)}
                     />
                     <div>
-                        <p className="font-medium">{row.original.name}</p>
+                        <p className="font-medium">{shortName(row.original)}</p>
                         <p className="text-xs text-muted-foreground">
                             {labelOf(options.vendors, row.original.vendor)}
                             {row.original.model
@@ -78,7 +158,7 @@ export function AiAccountsTable({
                 <DataTableColumnHeader column={column} title="Token" />
             ),
             cell: ({ row }) => (
-                <div className="whitespace-normal">
+                <div className="min-w-56 whitespace-normal">
                     <p>{labelOf(options.auth_types, row.original.auth_type)}</p>
                     <p className="font-mono text-xs text-muted-foreground">
                         {row.original.token_mask ?? '—'}
@@ -101,26 +181,7 @@ export function AiAccountsTable({
             header: ({ column }) => (
                 <DataTableColumnHeader column={column} title="Trạng thái" />
             ),
-            cell: ({ row }) => (
-                <div className="whitespace-normal">
-                    <span
-                        className={`rounded-full px-2 py-0.5 text-xs font-medium ${row.original.enabled ? STATUS_STYLE[row.original.status] : 'bg-muted text-muted-foreground'}`}
-                    >
-                        {row.original.enabled
-                            ? STATUS_LABEL[row.original.status]
-                            : 'Đã tắt'}
-                    </span>
-                    {row.original.status === 'error' &&
-                        row.original.last_error && (
-                            <p
-                                role="alert"
-                                className="mt-1 text-xs text-destructive"
-                            >
-                                {row.original.last_error}
-                            </p>
-                        )}
-                </div>
-            ),
+            cell: ({ row }) => <StatusText account={row.original} />,
         },
         {
             id: 'limit',

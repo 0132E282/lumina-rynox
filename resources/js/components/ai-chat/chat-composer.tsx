@@ -3,8 +3,10 @@ import {
     Bot,
     Check,
     ChevronDown,
+    FileCode,
     ListChecks,
     Paperclip,
+    Plus,
     Wand2,
     X,
     Zap,
@@ -16,10 +18,11 @@ import { SourceIcon } from '@/components/ai-chat/source-icon';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { Button } from '@/components/ui/button';
 import {
-    Popover,
-    PopoverContent,
-    PopoverTrigger,
-} from '@/components/ui/popover';
+    referenceLabel,
+    referenceLines,
+    takeCopied,
+} from '@/lib/code-reference';
+import type { CodeReference } from '@/lib/code-reference';
 import { matchCommands } from '@/lib/ai-commands';
 import type { AiCommand } from '@/lib/ai-commands';
 import { cn } from '@/lib/utils';
@@ -35,8 +38,16 @@ import type {
     AiAgentRun,
     AiChatAccount,
     AiChatMode,
+    AiChatActivityStep,
     AiChatSelection,
 } from '@/types';
+
+const ACTIVITY_LABEL: Record<string, string> = {
+    tree: 'Cây tệp',
+    file: 'Đọc tệp',
+    attachment: 'Đính kèm',
+    image: 'Ảnh',
+};
 
 /**
  * Rounded textarea + round send button. Custom (not the shared `Field`) because it needs Enter-to-send with Shift+Enter for a newline.
@@ -54,6 +65,9 @@ export function ChatComposer({
     onSelectionChange,
     files,
     onFilesChange,
+    references = [],
+    onReferencesChange,
+    activity = [],
     acceptedExtensions,
     maxFiles,
     repo,
@@ -61,10 +75,12 @@ export function ChatComposer({
     extraRepos,
     onExtraReposChange,
     githubConnected,
+    showProjects = true,
     onOptimize,
     optimizing,
     mode,
     onModeChange,
+    focusSignal,
     onUndoOptimize,
 }: {
     value: string;
@@ -82,6 +98,11 @@ export function ChatComposer({
     /** * Files attached to the next message (read by the server for that turn only). */
     files: File[];
     onFilesChange: (files: File[]) => void;
+    /** * Code picked in the viewer, shown as tags above the text. */
+    references?: CodeReference[];
+    onReferencesChange?: (references: CodeReference[]) => void;
+    /** * What the app read for the latest answer (names and counts only). */
+    activity?: AiChatActivityStep[];
     acceptedExtensions: string[];
     maxFiles: number;
     /** * `owner/name` of the GitHub repo the AI may read, or null. */
@@ -90,6 +111,8 @@ export function ChatComposer({
     extraRepos: string[];
     onExtraReposChange: (extras: string[]) => void;
     githubConnected: boolean;
+    /** * The project row (picked projects and the picker) shows on the Code tab only. */
+    showProjects?: boolean;
     onOptimize: () => void;
     optimizing: boolean;
     /** * Open the pull request for AI edits without a manual approval. */
@@ -100,9 +123,20 @@ export function ChatComposer({
     onModeChange: (mode: AiChatMode) => void;
     /** * Set after "Tối ưu" rewrote the draft: restores the draft as it was. */
     onUndoOptimize?: () => void;
+    /** * Changes when something outside put text in the draft: the cursor goes to its end. */
+    focusSignal?: number;
 }) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    useEffect(() => {
+        const field = textareaRef.current;
+
+        if (focusSignal !== undefined && field) {
+            field.focus();
+            field.setSelectionRange(field.value.length, field.value.length);
+        }
+    }, [focusSignal]);
 
     useEffect(() => {
         if (autoFocus) {
@@ -132,6 +166,32 @@ export function ChatComposer({
         return () => window.clearInterval(timer);
     }, [agents.length]);
 
+    // * The agent list opens only when the person presses the Agent button.
+    const [agentsOpen, setAgentsOpen] = useState(false);
+    // * The panel sits in the middle of the chat column: centred on the composer's width, and on the window's height.
+    const rootRef = useRef<HTMLDivElement>(null);
+    const [panelCenter, setPanelCenter] = useState({ x: 0, width: 640 });
+
+    useEffect(() => {
+        const place = () => {
+            const rect = rootRef.current?.getBoundingClientRect();
+
+            if (rect) {
+                setPanelCenter({
+                    x: rect.left + rect.width / 2,
+                    width: Math.min(640, rect.width),
+                });
+            }
+        };
+
+        if (agentsOpen) {
+            place();
+            window.addEventListener('resize', place);
+        }
+
+        return () => window.removeEventListener('resize', place);
+    }, [agentsOpen]);
+
     const picked = accounts.find(
         (account) => account.id === selection.accountId,
     );
@@ -141,10 +201,13 @@ export function ChatComposer({
           picked.name)
         : '';
 
+    // * A message may be only tags (picked code) without typed text.
+    const empty = value.trim() === '' && references.length === 0;
+
     const submit = (event?: FormEvent) => {
         event?.preventDefault();
 
-        if (sending || value.trim() === '') {
+        if (sending || empty) {
             return;
         }
 
@@ -206,10 +269,109 @@ export function ChatComposer({
 
     const busy = sending || optimizing;
     const [projectTitle, setProjectTitle] = useState('');
+    // * Narrow chat: the project chips fold into one menu, whose "Thêm dự án" opens the picker dialog.
+    const [pickerOpen, setPickerOpen] = useState(false);
     const pickedProjects = repo === null ? [] : [repo, ...extraRepos];
 
     return (
-        <div className="relative flex flex-col gap-2">
+        <div ref={rootRef} className="@container relative flex flex-col gap-2">
+            {/* * Big panel in the middle of the chat while an AI works: who is running, what step, and what the app read for it. Opens by itself; the person can close it. */}
+            {agentsOpen && (
+                <section
+                    aria-label="Agent đang làm việc"
+                    style={{ left: panelCenter.x, width: panelCenter.width }}
+                    className="fixed top-1/2 z-50 flex max-h-[min(30rem,70vh)] -translate-x-1/2 -translate-y-1/2 animate-in flex-col overflow-hidden rounded-2xl border bg-popover text-popover-foreground shadow-xl fade-in-0 zoom-in-95 motion-reduce:animate-none"
+                >
+                    <div className="flex items-center justify-between border-b px-4 py-3">
+                        <h2 className="text-sm font-medium">
+                            {agents.length === 0
+                                ? 'Chưa có agent nào đang làm việc'
+                                : `${agents.length} task đang chạy`}
+                        </h2>
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Đóng"
+                            onClick={() => setAgentsOpen(false)}
+                            className="size-7 text-muted-foreground"
+                        >
+                            <X aria-hidden="true" />
+                        </Button>
+                    </div>
+                    <div className="flex min-h-0 flex-col gap-4 overflow-y-auto p-4">
+                        {agents.length > 0 && (
+                            <ul className="flex flex-col gap-2">
+                                {agents.map((agent) => (
+                                    <li
+                                        key={agent.id}
+                                        className="flex flex-col gap-1 rounded-xl bg-muted/50 px-3 py-2.5 text-sm"
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <span
+                                                aria-hidden="true"
+                                                className="size-2 shrink-0 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
+                                            />
+                                            <span className="truncate font-medium">
+                                                {agent.name}
+                                            </span>
+                                            <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
+                                                {Math.max(
+                                                    0,
+                                                    Math.floor(
+                                                        (now -
+                                                            agent.startedAt) /
+                                                            1000,
+                                                    ),
+                                                )}
+                                                s
+                                            </span>
+                                        </span>
+                                        <span className="text-xs text-muted-foreground">
+                                            {agent.step}
+                                        </span>
+                                        <span className="line-clamp-2 text-xs text-muted-foreground/80">
+                                            Yêu cầu: {agent.task}
+                                        </span>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                        {activity.length > 0 && (
+                            <div className="flex flex-col gap-1.5">
+                                <h3 className="text-xs font-medium text-muted-foreground">
+                                    Lần trả lời gần nhất, app đã đọc
+                                </h3>
+                                <ul className="flex flex-col gap-1 text-sm">
+                                    {activity.map((step, index) => (
+                                        <li
+                                            key={`${step.kind}-${step.detail}-${index}`}
+                                            className="flex items-baseline gap-2"
+                                        >
+                                            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                                                {ACTIVITY_LABEL[step.kind] ??
+                                                    step.kind}
+                                            </span>
+                                            <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                                                {step.detail}
+                                            </span>
+                                            <span className="shrink-0 text-xs text-muted-foreground">
+                                                {step.source}
+                                            </span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+                        {agents.length === 0 && activity.length === 0 && (
+                            <p className="text-sm text-muted-foreground">
+                                Khi AI làm việc, các bước và những gì nó đọc sẽ
+                                hiện ở đây.
+                            </p>
+                        )}
+                    </div>
+                </section>
+            )}
             {menuOpen && (
                 <ul
                     id="ai-command-list"
@@ -243,59 +405,151 @@ export function ChatComposer({
                     ))}
                 </ul>
             )}
-            <ul
-                aria-label="Dự án đã chọn"
-                className="flex flex-wrap gap-1.5 px-1"
-            >
-                {repo !== null && projectTitle !== '' && (
-                    <li className="max-w-56 truncate px-1 py-1 text-xs font-medium">
-                        {projectTitle}
-                    </li>
-                )}
-                {pickedProjects.map((id) => {
-                    const local = id.startsWith('local:');
-                    const name = local ? id.slice(6) : id;
+            {showProjects && (
+                <div className="@max-lg:hidden">
+                    <ul
+                        aria-label="Dự án đã chọn"
+                        className="flex flex-wrap gap-1.5 px-1"
+                    >
+                        {repo !== null && projectTitle !== '' && (
+                            <li className="max-w-56 truncate px-1 py-1 text-xs font-medium">
+                                {projectTitle}
+                            </li>
+                        )}
+                        {pickedProjects.map((id) => {
+                            const local = id.startsWith('local:');
+                            const name = local ? id.slice(6) : id;
 
-                    return (
-                        <li
-                            key={id}
-                            title={name}
-                            className="flex max-w-56 items-center gap-1.5 rounded-lg bg-muted py-1 pr-1 pl-2 text-xs"
-                        >
-                            <SourceIcon
-                                local={local}
-                                className="text-muted-foreground"
-                            />
-                            <span className="truncate">
-                                {name.split('/').pop()}
-                            </span>
-                            <button
-                                type="button"
-                                aria-label={`Bỏ dự án ${name}`}
+                            return (
+                                <li
+                                    key={id}
+                                    title={name}
+                                    className="flex max-w-72 items-center gap-2 rounded-lg border bg-muted py-1.5 pr-1.5 pl-2.5 text-sm font-medium"
+                                >
+                                    <SourceIcon
+                                        local={local}
+                                        className="text-foreground/70"
+                                    />
+                                    <span className="truncate">
+                                        {name.split('/').pop()}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        aria-label={`Bỏ dự án ${name}`}
+                                        disabled={busy}
+                                        onClick={() => {
+                                            const rest = pickedProjects.filter(
+                                                (item) => item !== id,
+                                            );
+
+                                            onRepoChange(rest[0] ?? null);
+                                            if (rest.length === 0) {
+                                                setProjectTitle('');
+                                            }
+                                            onExtraReposChange(rest.slice(1));
+                                        }}
+                                        className="rounded-sm p-0.5 text-foreground/60 hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    >
+                                        <X
+                                            aria-hidden="true"
+                                            className="size-3.5"
+                                        />
+                                    </button>
+                                </li>
+                            );
+                        })}
+                        <li>
+                            <RepoPicker
+                                projectTitle={projectTitle}
+                                onProjectTitleChange={setProjectTitle}
+                                compact
+                                repo={repo}
+                                onChange={onRepoChange}
+                                extras={extraRepos}
+                                onExtrasChange={onExtraReposChange}
+                                connected={githubConnected}
                                 disabled={busy}
-                                onClick={() => {
-                                    const rest = pickedProjects.filter(
-                                        (item) => item !== id,
-                                    );
-
-                                    onRepoChange(rest[0] ?? null);
-                                    if (rest.length === 0) {
-                                        setProjectTitle('');
-                                    }
-                                    onExtraReposChange(rest.slice(1));
-                                }}
-                                className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                            >
-                                <X aria-hidden="true" className="size-3" />
-                            </button>
+                            />
                         </li>
-                    );
-                })}
-                <li>
+                    </ul>
+                </div>
+            )}
+            {showProjects && (
+                <div className="hidden @max-lg:block">
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={busy}
+                                aria-label="Dự án"
+                                className="h-9 w-full justify-start gap-1.5 border border-border/60 bg-muted/40 px-3 text-muted-foreground hover:bg-muted/70"
+                            >
+                                <SourceIcon
+                                    local={repo?.startsWith('local:') === true}
+                                />
+                                <span className="min-w-0 flex-1 truncate text-left">
+                                    {pickedProjects.length === 0
+                                        ? 'Dự án'
+                                        : projectTitle ||
+                                          (pickedProjects[0]
+                                              .replace(/^local:/, '')
+                                              .split('/')
+                                              .pop() ??
+                                              'Dự án')}
+                                    {pickedProjects.length > 1 &&
+                                        ` +${pickedProjects.length - 1}`}
+                                </span>
+                                <ChevronDown
+                                    aria-hidden="true"
+                                    className="size-3.5 shrink-0"
+                                />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                            align="start"
+                            className="w-(--radix-dropdown-menu-trigger-width) min-w-56"
+                        >
+                            {pickedProjects.map((id) => (
+                                <DropdownMenuItem
+                                    key={id}
+                                    onSelect={() => {
+                                        const rest = pickedProjects.filter(
+                                            (item) => item !== id,
+                                        );
+
+                                        onRepoChange(rest[0] ?? null);
+                                        if (rest.length === 0) {
+                                            setProjectTitle('');
+                                        }
+                                        onExtraReposChange(rest.slice(1));
+                                    }}
+                                >
+                                    <X aria-hidden="true" />
+                                    <span className="truncate">
+                                        Bỏ {id.replace(/^local:/, '')}
+                                    </span>
+                                </DropdownMenuItem>
+                            ))}
+                            {pickedProjects.length > 0 && (
+                                <DropdownMenuSeparator />
+                            )}
+                            <DropdownMenuItem
+                                onSelect={() => setPickerOpen(true)}
+                            >
+                                <Plus aria-hidden="true" />
+                                {pickedProjects.length === 0
+                                    ? 'Chọn dự án'
+                                    : 'Thêm dự án'}
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                     <RepoPicker
+                        open={pickerOpen}
+                        onOpenChange={setPickerOpen}
                         projectTitle={projectTitle}
                         onProjectTitleChange={setProjectTitle}
-                        compact
                         repo={repo}
                         onChange={onRepoChange}
                         extras={extraRepos}
@@ -303,11 +557,11 @@ export function ChatComposer({
                         connected={githubConnected}
                         disabled={busy}
                     />
-                </li>
-            </ul>
+                </div>
+            )}
             <form
                 onSubmit={submit}
-                className="flex flex-col gap-1 rounded-2xl border border-input bg-card px-3 pt-3 pb-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50 dark:bg-input/30"
+                className="@container flex flex-col gap-1 rounded-2xl border border-input bg-card px-3 pt-3 pb-2 shadow-sm dark:bg-input/30"
             >
                 {files.length > 0 && (
                     <ul className="flex flex-wrap gap-1.5 px-1">
@@ -333,8 +587,79 @@ export function ChatComposer({
                         ))}
                     </ul>
                 )}
+                {references.length > 0 && (
+                    <ul
+                        aria-label="Đoạn code đã chọn"
+                        className="flex flex-wrap gap-1.5 px-1"
+                    >
+                        {references.map((reference, index) => (
+                            <li
+                                key={`${reference.path}:${reference.startLine}-${reference.endLine}-${index}`}
+                                title={`${reference.path}:${referenceLines(reference)}`}
+                                className="flex max-w-60 items-center gap-1 rounded-md border bg-muted py-0.5 pr-1 pl-1.5 text-xs"
+                            >
+                                <FileCode
+                                    aria-hidden="true"
+                                    className="size-3.5 shrink-0 text-muted-foreground"
+                                />
+                                <span className="truncate font-medium">
+                                    {referenceLabel(reference)}
+                                </span>
+                                <button
+                                    type="button"
+                                    aria-label={`Bỏ ${referenceLabel(reference)}`}
+                                    onClick={() =>
+                                        onReferencesChange?.(
+                                            references.filter(
+                                                (_, i) => i !== index,
+                                            ),
+                                        )
+                                    }
+                                    className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                >
+                                    <X aria-hidden="true" className="size-3" />
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
                 <textarea
                     ref={textareaRef}
+                    onPaste={(event) => {
+                        // * A picture on the clipboard (a screenshot, a copied image) joins the attachments.
+                        const images = Array.from(
+                            event.clipboardData.files,
+                        ).filter((file) => file.type.startsWith('image/'));
+
+                        if (images.length > 0) {
+                            event.preventDefault();
+                            onFilesChange(
+                                [
+                                    ...files,
+                                    ...images.map(
+                                        (file, index) =>
+                                            new File(
+                                                [file],
+                                                `anh-dan-${Date.now()}-${index}.${file.type.split('/')[1]?.replace('jpeg', 'jpg') ?? 'png'}`,
+                                                { type: file.type },
+                                            ),
+                                    ),
+                                ].slice(0, maxFiles),
+                            );
+
+                            return;
+                        }
+
+                        // * Lines copied from the code viewer become a tag (file and lines) instead of the code text.
+                        const reference = takeCopied(
+                            event.clipboardData.getData('text'),
+                        );
+
+                        if (reference !== null && onReferencesChange) {
+                            event.preventDefault();
+                            onReferencesChange([...references, reference]);
+                        }
+                    }}
                     value={value}
                     onChange={(event) => {
                         setMenuDismissed(false);
@@ -374,6 +699,100 @@ export function ChatComposer({
                             );
                         }}
                     />
+                    {/* * A narrow chat folds the toolbar into this one menu. */}
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                disabled={busy}
+                                aria-label="Thêm tùy chọn"
+                                className="invisible w-0 overflow-hidden px-0 text-muted-foreground opacity-0 transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:visible @max-lg:w-8 @max-lg:opacity-100"
+                            >
+                                <Plus aria-hidden="true" />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="min-w-56">
+                            <DropdownMenuItem
+                                disabled={files.length >= maxFiles}
+                                onSelect={() => fileInputRef.current?.click()}
+                            >
+                                <Paperclip aria-hidden="true" />
+                                Đính kèm tệp
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                                disabled={value.trim() === ''}
+                                onSelect={onOptimize}
+                            >
+                                <Wand2 aria-hidden="true" />
+                                Tối ưu
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                                onSelect={() => onModeChange('auto')}
+                                className="justify-between gap-2"
+                            >
+                                <span className="flex items-center gap-2">
+                                    <Zap aria-hidden="true" />
+                                    Auto
+                                </span>
+                                {mode === 'auto' && (
+                                    <Check aria-hidden="true" />
+                                )}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                                onSelect={() => onModeChange('plan')}
+                                className="justify-between gap-2"
+                            >
+                                <span className="flex items-center gap-2">
+                                    <ListChecks aria-hidden="true" />
+                                    Plan
+                                </span>
+                                {mode === 'plan' && (
+                                    <Check aria-hidden="true" />
+                                )}
+                            </DropdownMenuItem>
+                            {accounts.map((account) => (
+                                <div key={account.id}>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">
+                                        {account.name}
+                                    </DropdownMenuLabel>
+                                    {(account.models.length > 0
+                                        ? account.models
+                                        : [{ id: '', label: account.name }]
+                                    ).map((model) => {
+                                        const modelId = model.id || null;
+                                        const isSelected =
+                                            account.id ===
+                                                selection.accountId &&
+                                            modelId === selection.model;
+
+                                        return (
+                                            <DropdownMenuItem
+                                                key={model.id}
+                                                onSelect={() =>
+                                                    onSelectionChange({
+                                                        accountId: account.id,
+                                                        model: modelId,
+                                                    })
+                                                }
+                                                className="justify-between gap-2"
+                                            >
+                                                <span className="truncate">
+                                                    {model.label}
+                                                </span>
+                                                {isSelected && (
+                                                    <Check aria-hidden="true" />
+                                                )}
+                                            </DropdownMenuItem>
+                                        );
+                                    })}
+                                </div>
+                            ))}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                     <Button
                         type="button"
                         variant="ghost"
@@ -382,7 +801,7 @@ export function ChatComposer({
                         aria-label="Đính kèm tệp"
                         title={`Đính kèm tệp (tối đa ${maxFiles})`}
                         onClick={() => fileInputRef.current?.click()}
-                        className="size-8 text-muted-foreground"
+                        className="size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
                     >
                         <Paperclip aria-hidden="true" />
                     </Button>
@@ -390,11 +809,11 @@ export function ChatComposer({
                         type="button"
                         variant="ghost"
                         size="sm"
-                        disabled={busy || value.trim() === ''}
+                        disabled={busy || empty}
                         aria-label="Tối ưu prompt"
                         title="Viết lại cho rõ ràng hơn (bạn xem rồi mới gửi)"
                         onClick={onOptimize}
-                        className="h-8 gap-1.5 px-2 text-muted-foreground"
+                        className="h-8 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
                     >
                         <Wand2 aria-hidden="true" />
                         {optimizing ? 'Đang tối ưu...' : 'Tối ưu'}
@@ -412,81 +831,32 @@ export function ChatComposer({
                         </Button>
                     )}
                     <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
-                        <Popover>
-                            <PopoverTrigger asChild>
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    aria-label={
-                                        agents.length === 0
-                                            ? 'Agent: đang rảnh'
-                                            : `${agents.length} agent đang làm việc`
-                                    }
-                                    className="h-8 shrink-0 gap-1.5 px-2 text-muted-foreground"
-                                >
-                                    <Bot aria-hidden="true" />
-                                    {agents.length === 0 ? (
-                                        'Agent'
-                                    ) : (
-                                        <>
-                                            <span
-                                                aria-hidden="true"
-                                                className="size-1.5 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
-                                            />
-                                            {agents.length} agent
-                                        </>
-                                    )}
-                                </Button>
-                            </PopoverTrigger>
-                            <PopoverContent
-                                align="end"
-                                className="w-80 p-2"
-                                aria-label="Agent đang làm việc"
-                            >
-                                {agents.length === 0 ? (
-                                    <p className="px-2 py-1.5 text-sm text-muted-foreground">
-                                        Chưa có agent nào đang làm việc.
-                                    </p>
-                                ) : (
-                                    <ul className="flex flex-col gap-1">
-                                        {agents.map((agent) => (
-                                            <li
-                                                key={agent.id}
-                                                className="flex flex-col gap-0.5 rounded-lg px-2 py-1.5 text-sm"
-                                            >
-                                                <span className="flex items-center gap-2">
-                                                    <span
-                                                        aria-hidden="true"
-                                                        className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
-                                                    />
-                                                    <span className="truncate font-medium">
-                                                        {agent.name}
-                                                    </span>
-                                                    <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
-                                                        {Math.max(
-                                                            0,
-                                                            Math.floor(
-                                                                (now -
-                                                                    agent.startedAt) /
-                                                                    1000,
-                                                            ),
-                                                        )}
-                                                        s
-                                                    </span>
-                                                </span>
-                                                <span className="truncate text-xs text-muted-foreground">
-                                                    {agent.step}
-                                                </span>
-                                                <span className="truncate text-xs text-muted-foreground/80">
-                                                    {agent.task}
-                                                </span>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                )}
-                            </PopoverContent>
-                        </Popover>
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            aria-expanded={agentsOpen}
+                            onClick={() => setAgentsOpen((open) => !open)}
+                            size="sm"
+                            aria-label={
+                                agents.length === 0
+                                    ? 'Agent: đang rảnh'
+                                    : `${agents.length} agent đang làm việc`
+                            }
+                            className="h-8 shrink-0 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
+                        >
+                            <Bot aria-hidden="true" />
+                            {agents.length === 0 ? (
+                                'Agent'
+                            ) : (
+                                <>
+                                    <span
+                                        aria-hidden="true"
+                                        className="size-1.5 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
+                                    />
+                                    {agents.length} agent
+                                </>
+                            )}
+                        </Button>
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                                 <Button
@@ -495,7 +865,7 @@ export function ChatComposer({
                                     size="sm"
                                     disabled={busy}
                                     aria-label="Chọn chế độ"
-                                    className="h-8 shrink-0 gap-1.5 px-2 text-muted-foreground"
+                                    className="h-8 shrink-0 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
                                 >
                                     {mode === 'plan' ? (
                                         <ListChecks aria-hidden="true" />
@@ -545,7 +915,7 @@ export function ChatComposer({
                                         size="sm"
                                         disabled={busy}
                                         aria-label="Chọn AI trả lời"
-                                        className="h-8 shrink-0 gap-2 px-2 text-muted-foreground"
+                                        className="h-8 shrink-0 gap-2 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
                                     >
                                         <VendorBadge
                                             vendorKey={picked.vendor_key}
@@ -623,7 +993,7 @@ export function ChatComposer({
                             type="submit"
                             size="icon"
                             className="size-8 shrink-0 rounded-full"
-                            disabled={busy || value.trim() === ''}
+                            disabled={busy || empty}
                             aria-label="Gửi tin nhắn"
                         >
                             <ArrowUp aria-hidden="true" />

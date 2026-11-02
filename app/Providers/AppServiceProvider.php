@@ -8,6 +8,8 @@ use App\Models\ChatMessage;
 use App\Models\Conversation;
 use App\Models\Integration;
 use App\Services\Ai\AutoReplySwitch;
+use App\Services\Ai\ChatActivity;
+use App\Services\Ai\ChatImages;
 use App\Services\Ai\McpPolicy;
 use App\Services\Chat\ChatChannels;
 use App\Services\Chat\ChatRealtime;
@@ -35,6 +37,8 @@ class AppServiceProvider extends ServiceProvider
     {
         $this->app->singleton(ChatRealtime::class);
         $this->app->scoped(McpPolicy::class);
+        $this->app->scoped(ChatImages::class);
+        $this->app->scoped(ChatActivity::class);
 
         // * Zalo and Messenger join the chat channel registry (Telegram is wired directly in `ChatChannels`); Zalo is listed first.
         $this->app->singleton(ZaloChatChannel::class);
