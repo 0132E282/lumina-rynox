@@ -7,6 +7,9 @@ declare(strict_types=1);
  * non-production environment and the request comes from the loopback address. The client picks a root by id; it never sends an absolute path.
  */
 return [
+    // * The file where each GitHub repo added to the Code tab is listed as a submodule entry (path + url, no gitlink). Its clone lives under `storage/app/repos`.
+    'gitmodules_path' => base_path('.gitmodules'),
+
     'local_workspace' => [
         'enabled' => (bool) env('AI_CHAT_LOCAL_ENABLED', false),
 
