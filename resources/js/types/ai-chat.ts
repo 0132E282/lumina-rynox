@@ -198,6 +198,36 @@ export type AiUsageStats = {
 };
 
 /** * One agent working right now (a message that is out and not answered yet), shown in the composer's Agent list. */
+/** * A subagent the AI (Claude CLI) started during an answer: `parent` is the subagent that started it, null when the main AI did. */
+export type AiSubagent = {
+    id: string;
+    parent: string | null;
+    role: string;
+    task: string;
+    step: string;
+    status: 'running' | 'done';
+    /** * Tokens the agent used (input, output and cache), known once it is done. */
+    tokens?: number;
+    /** * Files the agent edited or wrote. */
+    files?: string[];
+    startedAt: number;
+    endedAt: number | null;
+};
+
+/** * Live subagent event from the stream: later events for the same id only carry the changed fields. */
+export type AiSubagentEvent = Partial<
+    Pick<
+        AiSubagent,
+        'parent' | 'role' | 'task' | 'step' | 'status' | 'tokens' | 'files'
+    >
+> & { id: string };
+
+/** * One line of the plan (to-do list) the AI keeps while it works. */
+export type AiPlanItem = {
+    content: string;
+    status: 'pending' | 'in_progress' | 'completed';
+};
+
 export type AiAgentRun = {
     id: number;
     /** * The AI account answering. */

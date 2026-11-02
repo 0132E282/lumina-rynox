@@ -14,9 +14,32 @@ import {
 } from '@/actions/App/Http/Controllers/AiChatController';
 import { Button } from '@/components/ui/button';
 import { aiErrorMessage } from '@/lib/ai-error';
+import { planRunMessage } from '@/lib/project-plans';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { AiChatProposal } from '@/types';
+
+/** * The tasks of a proposed plan file, handed to the AI as one message. */
+function planMessage(plan: AiChatProposal): string {
+    let tasks: { id: string | null; title: string }[] = [];
+
+    try {
+        const rows: unknown[] = JSON.parse(plan.content)?.content?.tasks ?? [];
+
+        tasks = rows.map((row) => {
+            const task = (row ?? {}) as Record<string, unknown>;
+
+            return {
+                id: task.id === undefined ? null : String(task.id),
+                title: String(task.title ?? ''),
+            };
+        });
+    } catch {
+        // * Not readable as a plan: the file path alone is sent.
+    }
+
+    return planRunMessage(plan.path, tasks);
+}
 
 const ACTION_LABELS = { create: 'Thêm mới', update: 'Sửa' } as const;
 
@@ -26,12 +49,15 @@ export function ProposalCard({
     proposals,
     onChange,
     onOpenFile,
+    onExecutePlan,
 }: {
     messageId: number;
     proposals: AiChatProposal[];
     onChange: (proposals: AiChatProposal[]) => void;
     /** Opens the file in the code viewer (as a diff while the edit is pending). */
     onOpenFile?: (repo: string, path: string) => void;
+    /** Sends a follow-up message: approving a plan file ("Duyệt và làm") then asks the AI to start working through its tasks. */
+    onExecutePlan?: (message: string) => void;
 }) {
     const [busy, setBusy] = useState<'apply' | 'reject' | 'revert' | null>(
         null,
@@ -40,6 +66,13 @@ export function ProposalCard({
     const pending = proposals.some((proposal) => proposal.status === 'pending');
     // * Edits for a folder of this machine (`local:{id}`) are applied by writing the file, not by opening a pull request.
     const isLocal = proposals[0].repo.startsWith('local:');
+    // * A plan the AI wrote into docs/plans (the index file alone is not a plan).
+    const planFile = proposals.find(
+        (proposal) =>
+            /^docs\/plans\/(?!index\.json$)[\w.-]+\.json$/.test(
+                proposal.path,
+            ) && proposal.status === 'pending',
+    );
     const pullUrl = proposals.find((proposal) => proposal.pull_url)?.pull_url;
     // * The first file whose change is still shown in the viewer (a dismissed edit is not).
     const reviewable = proposals.find(
@@ -49,6 +82,15 @@ export function ProposalCard({
     // * Local edits are written as soon as the AI answers; an applied one can still be undone.
     const revertible =
         isLocal && proposals.some((proposal) => proposal.status === 'applied');
+
+    // * "Duyệt và làm" on a GitHub project: no pull request and no write to the repo. The agent starts from the plan itself (its task list goes into the message, since the repo does not have the file yet).
+    const [started, setStarted] = useState(false);
+    const startPlan = () => {
+        if (planFile && onExecutePlan) {
+            setStarted(true);
+            onExecutePlan(planMessage(planFile));
+        }
+    };
 
     const run = async (kind: 'apply' | 'reject' | 'revert') => {
         setBusy(kind);
@@ -68,6 +110,11 @@ export function ProposalCard({
             invalidateAiChatCache(`tree.${proposals[0].repo}`);
             invalidateAiChatCache(`file.${proposals[0].repo}.`);
             onChange(data.proposals);
+
+            // * A plan written into a folder of this machine: the AI goes on with its tasks.
+            if (kind === 'apply' && isLocal && planFile && onExecutePlan) {
+                onExecutePlan(planMessage(planFile));
+            }
         } catch (caught) {
             setError(aiErrorMessage(caught));
 
@@ -158,16 +205,24 @@ export function ProposalCard({
                     <Button
                         type="button"
                         size="sm"
-                        disabled={busy !== null}
-                        onClick={() => void run('apply')}
+                        disabled={busy !== null || started}
+                        onClick={() =>
+                            planFile && onExecutePlan && !isLocal
+                                ? startPlan()
+                                : void run('apply')
+                        }
                     >
                         {busy === 'apply'
                             ? isLocal
                                 ? 'Đang ghi tệp...'
                                 : 'Đang tạo Pull Request...'
-                            : isLocal
-                              ? 'Áp dụng'
-                              : 'Duyệt và tạo Pull Request'}
+                            : planFile && onExecutePlan
+                              ? started
+                                  ? 'Đã giao agent làm'
+                                  : 'Duyệt và làm'
+                              : isLocal
+                                ? 'Áp dụng'
+                                : 'Duyệt và tạo Pull Request'}
                     </Button>
                     <Button
                         type="button"
@@ -181,7 +236,9 @@ export function ProposalCard({
                     <span className="text-xs text-muted-foreground">
                         {isLocal
                             ? 'Chỉ ghi vào máy khi bạn bấm Áp dụng; tệp đã đổi kể từ lúc đề xuất sẽ bị từ chối.'
-                            : 'Tạo nhánh mới và Pull Request, không ghi thẳng vào nhánh chính.'}
+                            : planFile && onExecutePlan
+                              ? 'Giao agent làm ngay, không ghi vào repo và không tạo Pull Request.'
+                              : 'Tạo nhánh mới và Pull Request, không ghi thẳng vào nhánh chính.'}
                     </span>
                 </div>
             ) : (

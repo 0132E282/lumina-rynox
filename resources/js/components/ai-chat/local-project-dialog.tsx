@@ -1,4 +1,4 @@
-import { Folder, FolderPlus, Info, Lock, Trash2, X } from 'lucide-react';
+import { Folder, Info, Lock, Plus, Trash2, X } from 'lucide-react';
 import { requestErrorMessage } from '@/lib/ai-error';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -416,9 +416,31 @@ export function LocalProjectDialog({
                                 aria-label="Thư mục nguồn"
                                 className="flex flex-col gap-2"
                             >
-                                <h3 className="text-sm font-medium">
-                                    Thư mục nguồn
-                                </h3>
+                                <div className="flex items-center justify-between gap-2">
+                                    <h3 className="text-sm font-medium">
+                                        Thư mục nguồn
+                                    </h3>
+                                    {picking && (
+                                        <span className="ml-auto text-xs text-muted-foreground">
+                                            Đang chờ chọn thư mục...
+                                        </span>
+                                    )}
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="icon"
+                                        className="size-7 rounded-full"
+                                        aria-label="Thêm thư mục"
+                                        title="Thêm thư mục"
+                                        disabled={
+                                            picking ||
+                                            folders.length >= MAX_FOLDERS
+                                        }
+                                        onClick={() => void chooseFolder()}
+                                    >
+                                        <Plus aria-hidden="true" />
+                                    </Button>
+                                </div>
                                 <div className="flex flex-col gap-2 rounded-xl border p-3">
                                     {folders.length === 0 && !picking && (
                                         <p className="pt-3 text-center text-sm text-muted-foreground">
@@ -457,22 +479,6 @@ export function LocalProjectDialog({
                                             </Button>
                                         </div>
                                     ))}
-                                    <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        className="self-center rounded-full"
-                                        disabled={
-                                            picking ||
-                                            folders.length >= MAX_FOLDERS
-                                        }
-                                        onClick={() => void chooseFolder()}
-                                    >
-                                        <FolderPlus aria-hidden="true" />
-                                        {picking
-                                            ? 'Đang chờ chọn thư mục...'
-                                            : 'Thêm'}
-                                    </Button>
                                 </div>
                                 {folderError && (
                                     <p

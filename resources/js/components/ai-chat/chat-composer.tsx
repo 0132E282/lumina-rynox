@@ -5,18 +5,30 @@ import {
     ChevronDown,
     FileCode,
     ListChecks,
+    ListPlus,
+    Mic,
+    Volume2,
     Paperclip,
     Plus,
+    Square,
     Wand2,
     X,
     Zap,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { useSpeechInput } from '@/hooks/use-speech-input';
+import { canSpeak, setAutoRead, useSpeech } from '@/lib/speak';
 import type { FormEvent, KeyboardEvent } from 'react';
+import { AttachmentTile } from '@/components/ai-chat/attachment-tile';
 import { RepoPicker } from '@/components/ai-chat/repo-picker';
+import { planRunMessage } from '@/lib/project-plans';
+import { useProjectPlans } from '@/hooks/use-project-plans';
+import { SubagentTree } from '@/components/ai-chat/subagent-tree';
+import { TaskBoard } from '@/components/ai-chat/task-board';
 import { SourceIcon } from '@/components/ai-chat/source-icon';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
     referenceLabel,
     referenceLines,
@@ -36,18 +48,13 @@ import {
 } from '@/components/ui/dropdown-menu';
 import type {
     AiAgentRun,
+    AiChatProposal,
+    AiPlanItem,
+    AiSubagent,
     AiChatAccount,
     AiChatMode,
-    AiChatActivityStep,
     AiChatSelection,
 } from '@/types';
-
-const ACTIVITY_LABEL: Record<string, string> = {
-    tree: 'Cây tệp',
-    file: 'Đọc tệp',
-    attachment: 'Đính kèm',
-    image: 'Ảnh',
-};
 
 /**
  * Rounded textarea + round send button. Custom (not the shared `Field`) because it needs Enter-to-send with Shift+Enter for a newline.
@@ -56,6 +63,9 @@ export function ChatComposer({
     value,
     onChange,
     onSubmit,
+    queued = [],
+    onRemoveQueued,
+    onStop,
     sending,
     agents,
     maxLength,
@@ -67,7 +77,10 @@ export function ChatComposer({
     onFilesChange,
     references = [],
     onReferencesChange,
-    activity = [],
+    proposals = [],
+    onSendMessage,
+    subagents = [],
+    plan = [],
     acceptedExtensions,
     maxFiles,
     repo,
@@ -86,9 +99,22 @@ export function ChatComposer({
     value: string;
     onChange: (value: string) => void;
     onSubmit: () => void;
+    /** * Stops the answer being waited for: the send button turns into a stop button while sending. */
+    onStop: () => void;
+    /** * Messages waiting for the current answer to finish. */
+    queued?: { id: string; text: string }[];
+    onRemoveQueued?: (id: string) => void;
     sending: boolean;
     /** * Agents working right now (every chat of the page): shown as a count, listed in a popover. */
     agents: AiAgentRun[];
+    /** * Subagents the AI started for the current answer, shown under the main agent as a tree. */
+    /** * File changes the AI proposed in this chat: a plan it wrote into docs/plans shows on the board before the project has the file. */
+    proposals?: AiChatProposal[];
+    /** * Sends a message of its own (the draft stays): "Bắt đầu" on the board hands a plan to the AI. */
+    onSendMessage?: (message: string) => void;
+    subagents?: AiSubagent[];
+    /** * The plan the AI keeps for the current answer: with the subagents it fills the board. */
+    plan?: AiPlanItem[];
     maxLength: number;
     autoFocus?: boolean;
     /** * Enabled AI accounts the person can pick to answer (Claude, Codex, ...). */
@@ -101,8 +127,6 @@ export function ChatComposer({
     /** * Code picked in the viewer, shown as tags above the text. */
     references?: CodeReference[];
     onReferencesChange?: (references: CodeReference[]) => void;
-    /** * What the app read for the latest answer (names and counts only). */
-    activity?: AiChatActivityStep[];
     acceptedExtensions: string[];
     maxFiles: number;
     /** * `owner/name` of the GitHub repo the AI may read, or null. */
@@ -168,6 +192,47 @@ export function ChatComposer({
 
     // * The agent list opens only when the person presses the Agent button.
     const [agentsOpen, setAgentsOpen] = useState(false);
+    const panelRef = useRef<HTMLElement>(null);
+
+    // * The panel closes on a click outside it (the Agent button toggles it itself) and on Escape.
+    useEffect(() => {
+        if (!agentsOpen) {
+            return;
+        }
+
+        const onPointerDown = (event: PointerEvent) => {
+            const target = event.target as Element | null;
+
+            // * Menus and popups opened from inside the panel live in portals outside it: a click in them is not "outside".
+            if (
+                !panelRef.current?.contains(target) &&
+                !target?.closest(
+                    '[data-agent-toggle], [role="dialog"], [role="listbox"], [data-radix-popper-content-wrapper]',
+                )
+            ) {
+                setAgentsOpen(false);
+            }
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            // * Escape closes an open popup or menu first, not the panel under it.
+            if (
+                event.key === 'Escape' &&
+                !document.querySelector('[role="dialog"], [role="listbox"]')
+            ) {
+                setAgentsOpen(false);
+            }
+        };
+
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [agentsOpen]);
+    const projectPlans = useProjectPlans(repo, agentsOpen, proposals);
+    const [agentTab, setAgentTab] = useState<'kanban' | 'diagram'>('kanban');
     // * The panel sits in the middle of the chat column: centred on the composer's width, and on the window's height.
     const rootRef = useRef<HTMLDivElement>(null);
     const [panelCenter, setPanelCenter] = useState({ x: 0, width: 640 });
@@ -177,9 +242,15 @@ export function ChatComposer({
             const rect = rootRef.current?.getBoundingClientRect();
 
             if (rect) {
+                // * Wider than the chat column (the board has three columns), but never off the window.
+                const width = Math.min(1680, window.innerWidth - 24);
+
                 setPanelCenter({
-                    x: rect.left + rect.width / 2,
-                    width: Math.min(640, rect.width),
+                    x: Math.min(
+                        Math.max(rect.left + rect.width / 2, width / 2 + 12),
+                        window.innerWidth - width / 2 - 12,
+                    ),
+                    width,
                 });
             }
         };
@@ -203,14 +274,29 @@ export function ChatComposer({
 
     // * A message may be only tags (picked code) without typed text.
     const empty = value.trim() === '' && references.length === 0;
+    const { auto: autoRead } = useSpeech();
+    // * Voice dictation: each phrase is added to the end of the message.
+    const valueRef = useRef(value);
+
+    valueRef.current = value;
+    const voice = useSpeechInput((text) => {
+        if (text !== '') {
+            const current = valueRef.current;
+
+            onChange(
+                `${current}${current === '' || /\s$/.test(current) ? '' : ' '}${text}`,
+            );
+        }
+    });
 
     const submit = (event?: FormEvent) => {
         event?.preventDefault();
 
-        if (sending || empty) {
+        if (empty) {
             return;
         }
 
+        voice.stop();
         onSubmit();
     };
 
@@ -278,16 +364,48 @@ export function ChatComposer({
             {/* * Big panel in the middle of the chat while an AI works: who is running, what step, and what the app read for it. Opens by itself; the person can close it. */}
             {agentsOpen && (
                 <section
+                    ref={panelRef}
                     aria-label="Agent đang làm việc"
                     style={{ left: panelCenter.x, width: panelCenter.width }}
-                    className="fixed top-1/2 z-50 flex max-h-[min(30rem,70vh)] -translate-x-1/2 -translate-y-1/2 animate-in flex-col overflow-hidden rounded-2xl border bg-popover text-popover-foreground shadow-xl fade-in-0 zoom-in-95 motion-reduce:animate-none"
+                    className="fixed top-[calc(50%-3rem)] z-50 flex h-[min(56rem,calc(100vh-11rem))] -translate-x-1/2 -translate-y-1/2 animate-in flex-col overflow-hidden rounded-2xl border bg-popover text-popover-foreground shadow-xl fade-in-0 zoom-in-95 motion-reduce:animate-none"
                 >
-                    <div className="flex items-center justify-between border-b px-4 py-3">
-                        <h2 className="text-sm font-medium">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2.5">
+                        <h2 className="flex items-center gap-2 text-sm font-medium">
+                            <span
+                                aria-hidden="true"
+                                className={cn(
+                                    'size-2 rounded-full',
+                                    agents.length > 0
+                                        ? 'animate-pulse bg-emerald-500 motion-reduce:animate-none'
+                                        : 'bg-muted-foreground/40',
+                                )}
+                            />
                             {agents.length === 0
                                 ? 'Chưa có agent nào đang làm việc'
-                                : `${agents.length} task đang chạy`}
+                                : `${agents.length} agent đang chạy`}
                         </h2>
+                        <Tabs
+                            value={agentTab}
+                            onValueChange={(value) =>
+                                setAgentTab(value as 'kanban' | 'diagram')
+                            }
+                            className="ml-auto"
+                        >
+                            <TabsList className="h-8">
+                                <TabsTrigger
+                                    value="kanban"
+                                    className="px-3 text-sm"
+                                >
+                                    Kanban
+                                </TabsTrigger>
+                                <TabsTrigger
+                                    value="diagram"
+                                    className="px-3 text-sm"
+                                >
+                                    Sơ đồ agent
+                                </TabsTrigger>
+                            </TabsList>
+                        </Tabs>
                         <Button
                             type="button"
                             variant="ghost"
@@ -299,75 +417,57 @@ export function ChatComposer({
                             <X aria-hidden="true" />
                         </Button>
                     </div>
-                    <div className="flex min-h-0 flex-col gap-4 overflow-y-auto p-4">
-                        {agents.length > 0 && (
-                            <ul className="flex flex-col gap-2">
-                                {agents.map((agent) => (
-                                    <li
-                                        key={agent.id}
-                                        className="flex flex-col gap-1 rounded-xl bg-muted/50 px-3 py-2.5 text-sm"
-                                    >
-                                        <span className="flex items-center gap-2">
-                                            <span
-                                                aria-hidden="true"
-                                                className="size-2 shrink-0 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
-                                            />
-                                            <span className="truncate font-medium">
-                                                {agent.name}
-                                            </span>
-                                            <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
-                                                {Math.max(
-                                                    0,
-                                                    Math.floor(
-                                                        (now -
-                                                            agent.startedAt) /
-                                                            1000,
-                                                    ),
-                                                )}
-                                                s
-                                            </span>
-                                        </span>
-                                        <span className="text-xs text-muted-foreground">
-                                            {agent.step}
-                                        </span>
-                                        <span className="line-clamp-2 text-xs text-muted-foreground/80">
-                                            Yêu cầu: {agent.task}
-                                        </span>
-                                    </li>
-                                ))}
-                            </ul>
+                    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+                        {agentTab === 'diagram' && (
+                            <SubagentTree
+                                subagents={subagents}
+                                rootName={
+                                    agents[0]?.name || picked?.name || 'AI'
+                                }
+                                working={agents.length > 0}
+                                vendorKey={picked?.vendor_key ?? ''}
+                                vendorLabel={picked?.vendor ?? 'AI'}
+                                now={now}
+                            />
                         )}
-                        {activity.length > 0 && (
-                            <div className="flex flex-col gap-1.5">
-                                <h3 className="text-xs font-medium text-muted-foreground">
-                                    Lần trả lời gần nhất, app đã đọc
-                                </h3>
-                                <ul className="flex flex-col gap-1 text-sm">
-                                    {activity.map((step, index) => (
-                                        <li
-                                            key={`${step.kind}-${step.detail}-${index}`}
-                                            className="flex items-baseline gap-2"
-                                        >
-                                            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-                                                {ACTIVITY_LABEL[step.kind] ??
-                                                    step.kind}
-                                            </span>
-                                            <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                                                {step.detail}
-                                            </span>
-                                            <span className="shrink-0 text-xs text-muted-foreground">
-                                                {step.source}
-                                            </span>
-                                        </li>
-                                    ))}
-                                </ul>
-                            </div>
-                        )}
-                        {agents.length === 0 && activity.length === 0 && (
-                            <p className="text-sm text-muted-foreground">
-                                Khi AI làm việc, các bước và những gì nó đọc sẽ
-                                hiện ở đây.
-                            </p>
+                        {agentTab === 'kanban' && (
+                            <TaskBoard
+                                plan={plan}
+                                subagents={subagents}
+                                projectPlans={projectPlans.plans}
+                                selectedPlan={projectPlans.selected}
+                                onSelectPlan={projectPlans.setSelected}
+                                projectTasks={projectPlans.tasks}
+                                planError={projectPlans.error}
+                                startDisabled={sending}
+                                onChatAbout={(card) => {
+                                    onChange(
+                                        `Sửa ${card.badge ? `${card.badge}: ` : ''}${card.text}\nFeedback: `,
+                                    );
+                                    setAgentsOpen(false);
+                                    setTimeout(
+                                        () => textareaRef.current?.focus(),
+                                        0,
+                                    );
+                                }}
+                                onStartPlan={
+                                    onSendMessage && projectPlans.selected
+                                        ? () => {
+                                              onSendMessage(
+                                                  planRunMessage(
+                                                      projectPlans.selected!,
+                                                      projectPlans.tasks.filter(
+                                                          (task) =>
+                                                              task.status !==
+                                                              'done',
+                                                      ),
+                                                  ),
+                                              );
+                                              setAgentsOpen(false);
+                                          }
+                                        : undefined
+                                }
+                            />
                         )}
                     </div>
                 </section>
@@ -483,7 +583,7 @@ export function ChatComposer({
                                 variant="ghost"
                                 size="sm"
                                 disabled={busy}
-                                aria-label="Dự án"
+                                aria-label="Thêm dự án"
                                 className="h-9 w-full justify-start gap-1.5 border border-border/60 bg-muted/40 px-3 text-muted-foreground hover:bg-muted/70"
                             >
                                 <SourceIcon
@@ -491,7 +591,7 @@ export function ChatComposer({
                                 />
                                 <span className="min-w-0 flex-1 truncate text-left">
                                     {pickedProjects.length === 0
-                                        ? 'Dự án'
+                                        ? 'Thêm dự án'
                                         : projectTitle ||
                                           (pickedProjects[0]
                                               .replace(/^local:/, '')
@@ -563,27 +663,49 @@ export function ChatComposer({
                 onSubmit={submit}
                 className="@container flex flex-col gap-1 rounded-2xl border border-input bg-card px-3 pt-3 pb-2 shadow-sm dark:bg-input/30"
             >
-                {files.length > 0 && (
-                    <ul className="flex flex-wrap gap-1.5 px-1">
-                        {files.map((file, index) => (
+                {queued.length > 0 && (
+                    <ul
+                        aria-label="Tin đang chờ gửi"
+                        className="flex flex-col gap-1 px-1 pb-1"
+                    >
+                        {queued.map((item, index) => (
                             <li
-                                key={`${file.name}-${index}`}
-                                className="flex max-w-48 items-center gap-1 rounded-md bg-muted py-0.5 pr-1 pl-2 text-xs"
+                                key={item.id}
+                                className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/50 py-1 pr-1 pl-2.5 text-xs text-muted-foreground"
                             >
-                                <span className="truncate">{file.name}</span>
+                                <span className="shrink-0 tabular-nums">
+                                    Chờ {index + 1}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-foreground">
+                                    {item.text}
+                                </span>
                                 <button
                                     type="button"
-                                    aria-label={`Bỏ tệp ${file.name}`}
-                                    onClick={() =>
-                                        onFilesChange(
-                                            files.filter((_, i) => i !== index),
-                                        )
-                                    }
-                                    className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    aria-label="Bỏ tin đang chờ"
+                                    onClick={() => onRemoveQueued?.(item.id)}
+                                    className="rounded-sm p-0.5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                                 >
                                     <X aria-hidden="true" className="size-3" />
                                 </button>
                             </li>
+                        ))}
+                    </ul>
+                )}
+                {files.length > 0 && (
+                    <ul
+                        aria-label="Tệp đính kèm"
+                        className="flex flex-wrap gap-2 px-1 pb-1"
+                    >
+                        {files.map((file, index) => (
+                            <AttachmentTile
+                                key={`${file.name}-${file.size}-${index}`}
+                                file={file}
+                                onRemove={() =>
+                                    onFilesChange(
+                                        files.filter((_, i) => i !== index),
+                                    )
+                                }
+                            />
                         ))}
                     </ul>
                 )}
@@ -676,9 +798,13 @@ export function ChatComposer({
                     onKeyDown={handleKeyDown}
                     rows={1}
                     maxLength={maxLength}
-                    disabled={busy}
+                    disabled={optimizing}
                     aria-label="Nhắn tin cho trợ lý AI"
-                    placeholder="Nhắn tin cho trợ lý AI"
+                    placeholder={
+                        sending
+                            ? 'Nhắn tiếp: tin sẽ được gửi sau khi AI trả lời xong'
+                            : 'Nhắn tin cho trợ lý AI'
+                    }
                     className="[field-sizing:content] max-h-48 min-h-8 w-full resize-none bg-transparent px-1 py-1 text-base outline-none placeholder:text-muted-foreground disabled:opacity-60 md:text-sm"
                 />
                 <div className="flex flex-wrap items-center gap-1">
@@ -835,6 +961,7 @@ export function ChatComposer({
                             type="button"
                             variant="ghost"
                             aria-expanded={agentsOpen}
+                            data-agent-toggle=""
                             onClick={() => setAgentsOpen((open) => !open)}
                             size="sm"
                             aria-label={
@@ -989,15 +1116,92 @@ export function ChatComposer({
                                 </DropdownMenuContent>
                             </DropdownMenu>
                         )}
-                        <Button
-                            type="submit"
-                            size="icon"
-                            className="size-8 shrink-0 rounded-full"
-                            disabled={busy || empty}
-                            aria-label="Gửi tin nhắn"
-                        >
-                            <ArrowUp aria-hidden="true" />
-                        </Button>
+                        {canSpeak() && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-pressed={autoRead}
+                                aria-label="Tự đọc to câu trả lời"
+                                title={
+                                    autoRead
+                                        ? 'Đang tự đọc câu trả lời (bấm để tắt)'
+                                        : 'Tự đọc to câu trả lời'
+                                }
+                                onClick={() => setAutoRead(!autoRead)}
+                                className={cn(
+                                    'size-8 shrink-0 rounded-full text-muted-foreground',
+                                    autoRead &&
+                                        'bg-accent text-accent-foreground',
+                                )}
+                            >
+                                <Volume2 aria-hidden="true" />
+                            </Button>
+                        )}
+                        {voice.supported && (
+                            <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                disabled={busy}
+                                aria-pressed={voice.listening}
+                                aria-label={
+                                    voice.listening
+                                        ? 'Dừng nói'
+                                        : 'Nhập bằng giọng nói'
+                                }
+                                title={
+                                    voice.listening
+                                        ? 'Dừng nói'
+                                        : 'Nhập bằng giọng nói'
+                                }
+                                onClick={voice.toggle}
+                                className={cn(
+                                    'size-8 shrink-0 rounded-full text-muted-foreground',
+                                    voice.listening &&
+                                        'animate-pulse bg-destructive/10 text-destructive motion-reduce:animate-none',
+                                )}
+                            >
+                                <Mic aria-hidden="true" />
+                            </Button>
+                        )}
+                        {sending && !empty && (
+                            <Button
+                                type="submit"
+                                variant="ghost"
+                                size="icon"
+                                className="size-8 shrink-0 rounded-full text-muted-foreground"
+                                aria-label="Xếp hàng gửi sau"
+                                title="Xếp hàng: gửi sau khi AI trả lời xong (Enter)"
+                            >
+                                <ListPlus aria-hidden="true" />
+                            </Button>
+                        )}
+                        {sending ? (
+                            <Button
+                                type="button"
+                                size="icon"
+                                onClick={onStop}
+                                className="size-8 shrink-0 rounded-full"
+                                aria-label="Dừng câu trả lời"
+                                title="Dừng câu trả lời"
+                            >
+                                <Square
+                                    aria-hidden="true"
+                                    className="fill-current"
+                                />
+                            </Button>
+                        ) : (
+                            <Button
+                                type="submit"
+                                size="icon"
+                                className="size-8 shrink-0 rounded-full"
+                                disabled={busy || empty}
+                                aria-label="Gửi tin nhắn"
+                            >
+                                <ArrowUp aria-hidden="true" />
+                            </Button>
+                        )}
                     </div>
                 </div>
             </form>

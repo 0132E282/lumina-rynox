@@ -7,6 +7,7 @@ use App\Http\Controllers\AiChatController;
 use App\Http\Controllers\AiChatSettingsController;
 use App\Http\Controllers\AiController;
 use App\Http\Controllers\AiProjectToolsController;
+use App\Http\Controllers\AiVoiceController;
 use App\Http\Controllers\ApiKeyController;
 use App\Http\Controllers\AppPasswordController;
 use App\Http\Controllers\CalendarController;
@@ -43,12 +44,14 @@ Route::middleware(['auth', 'web'])->group(function () {
     Route::get('/', [AiChatController::class, 'index'])->name('home');
     Route::get('dashboard', [DashboardController::class, 'index'])->name('dashboard');
     Route::post('ai-chat/messages', [AiChatController::class, 'send'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai'])->name('ai-chat.send');
+    Route::post('ai-chat/messages/stream', [AiChatController::class, 'sendStream'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai'])->name('ai-chat.send.stream');
     Route::delete('ai-chat/conversations/{conversation}', [AiChatController::class, 'destroyConversation'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-delete'])->name('ai-chat.conversations.destroy');
     Route::delete('ai-chat/conversations', [AiChatController::class, 'destroyConversations'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:5,1,ai-delete-all'])->name('ai-chat.conversations.destroy-all');
     Route::post('ai-chat/messages/{message}/proposals/apply', [AiChatController::class, 'applyProposals'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:5,1,ai-apply'])->name('ai-chat.proposals.apply');
     Route::post('ai-chat/messages/{message}/proposals/reject', [AiChatController::class, 'rejectProposals'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:20,1,ai-apply'])->name('ai-chat.proposals.reject');
     Route::get('ai-chat/github/repos', [AiChatController::class, 'repos'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-github'])->name('ai-chat.github.repos');
     Route::get('ai-chat/github/tree', [AiChatController::class, 'tree'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-github'])->name('ai-chat.github.tree');
+    Route::get('ai-chat/github/branches', [AiChatController::class, 'branches'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-github'])->name('ai-chat.github.branches');
     Route::get('ai-chat/github/file', [AiChatController::class, 'file'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:60,1,ai-github'])->name('ai-chat.github.file');
     Route::get('ai-chat/usage', [AiChatController::class, 'usage'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-usage'])->name('ai-chat.usage');
     Route::put('ai-chat/settings', [AiChatSettingsController::class, 'update'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-settings'])->name('ai-chat.settings.update');
@@ -64,7 +67,9 @@ Route::middleware(['auth', 'web'])->group(function () {
     Route::get('ai-chat/local/tree', [LocalWorkspaceController::class, 'tree'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:30,1,ai-local'])->name('ai-chat.local.tree');
     Route::get('ai-chat/local/file', [LocalWorkspaceController::class, 'file'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:60,1,ai-local'])->name('ai-chat.local.file');
     Route::get('ai-chat/local/changes', [LocalWorkspaceController::class, 'changes'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:60,1,ai-local'])->name('ai-chat.local.changes');
+    Route::get('ai-chat/local/branches', [LocalWorkspaceController::class, 'branches'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:60,1,ai-local'])->name('ai-chat.local.branches');
     Route::get('ai-chat/local/head', [LocalWorkspaceController::class, 'head'])->middleware([AuthorizeResource::class.':ai,local-read', 'throttle:120,1,ai-local'])->name('ai-chat.local.head');
+    Route::post('ai-chat/local/exec', [LocalWorkspaceController::class, 'exec'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:30,1,ai-local-exec'])->name('ai-chat.local.exec');
     Route::put('ai-chat/local/file', [LocalWorkspaceController::class, 'save'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:30,1,ai-local-write'])->name('ai-chat.local.file.save');
     Route::post('ai-chat/messages/{message}/proposals/apply-local', [AiChatController::class, 'applyLocalProposals'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-write'])->name('ai-chat.proposals.apply-local');
     Route::post('ai-chat/messages/{message}/proposals/revert-local', [AiChatController::class, 'revertLocalProposals'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:20,1,ai-local-write'])->name('ai-chat.proposals.revert-local');
@@ -72,6 +77,11 @@ Route::middleware(['auth', 'web'])->group(function () {
     Route::get('ai-chat/tools', [AiProjectToolsController::class, 'index'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-tools'])->name('ai-chat.tools.index');
     Route::put('ai-chat/tools', [AiProjectToolsController::class, 'toggle'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:60,1,ai-tools'])->name('ai-chat.tools.toggle');
     Route::post('ai-chat/tools', [AiProjectToolsController::class, 'store'])->middleware([AuthorizeResource::class.':ai,local-write', 'throttle:10,1,ai-tools-create'])->name('ai-chat.tools.store');
+    // * Spoken-answer voices (ElevenLabs): the key stays on the server.
+    Route::get('ai-chat/voices', [AiVoiceController::class, 'index'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:30,1,ai-voice'])->name('ai-chat.voices.index');
+    Route::post('ai-chat/voices/speak', [AiVoiceController::class, 'speak'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:120,1,ai-voice-speak'])->name('ai-chat.voices.speak');
+    Route::post('ai-chat/voices', [AiVoiceController::class, 'store'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:5,1,ai-voice-clone'])->name('ai-chat.voices.store');
+    Route::delete('ai-chat/voices/{voice}', [AiVoiceController::class, 'destroy'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai-voice-clone'])->name('ai-chat.voices.destroy');
     Route::post('ai-chat/optimize', [AiChatController::class, 'optimize'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai'])->name('ai-chat.optimize');
     Route::get('system', [SystemController::class, 'index'])->name('system.index');
     Route::get('activity-logs', [ActivityLogController::class, 'index'])->name('activity-logs.index');

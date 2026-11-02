@@ -8,11 +8,10 @@ import {
     Plus,
     Terminal,
 } from 'lucide-react';
+import axios from 'axios';
+import { postStream } from '@/lib/post-stream';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-    optimize,
-    send,
-} from '@/actions/App/Http/Controllers/AiChatController';
+import { optimize } from '@/actions/App/Http/Controllers/AiChatController';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -34,10 +33,15 @@ import { FileViewer } from '@/components/ai-chat/file-viewer';
 import { SidePanel } from '@/components/ai-chat/side-panel';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { SessionPanel } from '@/components/ai-chat/session-panel';
+import { speakIfAuto, stopSpeaking } from '@/lib/speak';
 import { markTyping } from '@/lib/typing';
 import { referenceBlock } from '@/lib/code-reference';
 import type { CodeReference } from '@/lib/code-reference';
 import { SourceIcon } from '@/components/ai-chat/source-icon';
+import {
+    GithubBranchPopover,
+    LocalBranchPopover,
+} from '@/components/ai-chat/branch-popover';
 import { RecentsList } from '@/components/ai-chat/recents-list';
 import type { RecentsTab } from '@/components/ai-chat/recents-list';
 import { Button } from '@/components/ui/button';
@@ -67,6 +71,8 @@ import type {
     AiChatAccount,
     AiChatActivityStep,
     AiAgentRun,
+    AiPlanItem,
+    AiSubagent,
     AiChatConversation,
     AiChatMessage,
     AiChatMode,
@@ -243,8 +249,11 @@ function ChatPanel({
     const [draft, setDraft] = useState('');
     // * Code picked in the viewer: shown as tags (file and lines) and sent with the next message.
     const [references, setReferences] = useState<CodeReference[]>([]);
-    // * What the app read for the last answer: shown in the agent panel.
-    const [activity, setActivity] = useState<AiChatActivityStep[]>([]);
+    // * What the app is doing for the message being answered, step by step as the server reports it.
+    const [liveSteps, setLiveSteps] = useState<AiChatActivityStep[]>([]);
+    // * Subagents the AI started for the answer being waited for (kept after it ends, cleared by the next send).
+    const [plan, setPlan] = useState<AiPlanItem[]>([]);
+    const [subagents, setSubagents] = useState<AiSubagent[]>([]);
     // * A request that was there before this chat mounted is already handled.
     const handledAsk = useRef<number | null>(askRequest?.id ?? null);
 
@@ -255,6 +264,12 @@ function ChatPanel({
         }
     }, [askRequest]);
     const [sending, setSending] = useState(false);
+    // * Messages written while an answer is still coming: sent one by one, each after the previous answer.
+    const [queue, setQueue] = useState<
+        { id: string; text: string; files: File[] }[]
+    >([]);
+    // * Stops the answer being waited for (the stop button).
+    const sendAbort = useRef<AbortController | null>(null);
     // * A send keeps running when the person opens another chat: its answer is saved on the server, so it must not pull them back here.
     const mounted = useRef(true);
 
@@ -294,7 +309,7 @@ function ChatPanel({
     );
     const assistant = assistantIdentity(settings, answering);
 
-    const submit = async (chosen?: string) => {
+    const submit = async (chosen?: string, queuedFiles: File[] = []) => {
         const text = (
             chosen ??
             [draft.trim(), ...references.map(referenceBlock)]
@@ -302,13 +317,34 @@ function ChatPanel({
                 .join('\n\n')
         ).trim();
 
-        if (text === '' || sending) {
+        if (text === '') {
+            return;
+        }
+
+        // * Still answering: the message waits its turn and goes out when the answer is done.
+        if (sending) {
+            setQueue((current) => [
+                ...current,
+                {
+                    id: `queued-${nextLocalId.current++}`,
+                    text,
+                    files: chosen === undefined ? files : queuedFiles,
+                },
+            ]);
+
+            if (chosen === undefined) {
+                setDraft('');
+                setReferences([]);
+                setPreviousDraft(null);
+                setFiles([]);
+            }
+
             return;
         }
 
         const localId = `local-${nextLocalId.current++}`;
 
-        const sentFiles = chosen === undefined ? files : [];
+        const sentFiles = chosen === undefined ? files : queuedFiles;
 
         if (chosen === undefined) {
             setDraft('');
@@ -317,6 +353,7 @@ function ChatPanel({
             setFiles([]);
         }
 
+        stopSpeaking();
         setSending(true);
         const agentId = onAgentStart({
             name:
@@ -396,9 +433,65 @@ function ChatPanel({
 
             onAgentStep(agentId, 'Đang đọc ngữ cảnh và trả lời');
 
-            const { data } = await api.post<AiChatSendResponse>(
-                send.url(),
+            const controller = new AbortController();
+
+            sendAbort.current = controller;
+
+            setLiveSteps([]);
+            setSubagents([]);
+            setPlan([]);
+
+            const data = await postStream<AiChatSendResponse>(
+                '/ai-chat/messages/stream',
                 form,
+                {
+                    signal: controller.signal,
+                    onPlan: setPlan,
+                    onAgent: (event) =>
+                        setSubagents((current) => {
+                            const known = current.some(
+                                (agent) => agent.id === event.id,
+                            );
+
+                            if (!known) {
+                                return [
+                                    ...current,
+                                    {
+                                        parent: null,
+                                        role: 'subagent',
+                                        task: '',
+                                        step: '',
+                                        status: 'running',
+                                        ...event,
+                                        startedAt: Date.now(),
+                                        endedAt: null,
+                                    },
+                                ];
+                            }
+
+                            return current.map((agent) =>
+                                agent.id === event.id
+                                    ? {
+                                          ...agent,
+                                          ...event,
+                                          endedAt:
+                                              event.status === 'done'
+                                                  ? Date.now()
+                                                  : agent.endedAt,
+                                      }
+                                    : agent,
+                            );
+                        }),
+                    onStep: (step) => {
+                        setLiveSteps((current) => [...current, step]);
+                        onAgentStep(
+                            agentId,
+                            step.kind === 'ask'
+                                ? 'Đang chờ AI trả lời'
+                                : `Đang đọc ${step.detail || step.source}`,
+                        );
+                    },
+                },
             );
 
             onAgentStep(agentId, 'Đang xử lý câu trả lời');
@@ -427,18 +520,20 @@ function ChatPanel({
 
             const isNew = conversationId.current === null;
 
-            setActivity(data.activity ?? []);
-
             // * The answer appears as if typed (only when it has no edit cards to wait for).
             if ((data.assistant_message.proposals ?? []).length === 0) {
                 markTyping(data.assistant_message.id);
             }
 
+            speakIfAuto(
+                data.assistant_message.id,
+                data.assistant_message.content,
+            );
             conversationId.current = data.conversation.id;
             setItems((current) => [
                 ...current.filter((item) => item.id !== localId),
                 data.user_message,
-                data.assistant_message,
+                { ...data.assistant_message, steps: data.activity ?? [] },
                 ...(data.auto_pr_error
                     ? [
                           {
@@ -474,6 +569,22 @@ function ChatPanel({
                 onPending(null);
             }
 
+            if (axios.isCancel(caught)) {
+                onLog('info', 'Đã dừng câu trả lời.');
+                setItems((current) => [
+                    ...current,
+                    {
+                        id: `error-${localId}`,
+                        role: 'error',
+                        content:
+                            'Đã dừng câu trả lời. Bạn có thể gửi lại hoặc hỏi tiếp.',
+                    },
+                ]);
+                setFiles(sentFiles);
+
+                return;
+            }
+
             onLog('error', `Gửi tin nhắn lỗi: ${aiErrorMessage(caught)}`);
             // * A failed send keeps the attached files so the person can try again.
             setFiles(sentFiles);
@@ -486,10 +597,22 @@ function ChatPanel({
                 },
             ]);
         } finally {
+            sendAbort.current = null;
+            setLiveSteps([]);
             setSending(false);
             onAgentEnd(agentId);
         }
     };
+
+    useEffect(() => {
+        if (!sending && queue.length > 0) {
+            const [next, ...rest] = queue;
+
+            setQueue(rest);
+            void submit(next.text, next.files);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sending, queue]);
 
     const optimizeDraft = async () => {
         const text = draft.trim();
@@ -535,11 +658,24 @@ function ChatPanel({
                 value={draft}
                 onChange={setDraft}
                 references={references}
-                activity={activity}
                 onReferencesChange={setReferences}
                 onSubmit={() => void submit()}
+                queued={queue}
+                onRemoveQueued={(id) =>
+                    setQueue((current) =>
+                        current.filter((item) => item.id !== id),
+                    )
+                }
+                onStop={() => {
+                    sendAbort.current?.abort();
+                    stopSpeaking();
+                }}
                 sending={sending}
                 agents={agents}
+                subagents={subagents}
+                proposals={items.flatMap((item) => item.proposals ?? [])}
+                onSendMessage={(text) => void submit(text)}
+                plan={plan}
                 maxLength={MAX_MESSAGE_LENGTH}
                 autoFocus
                 accounts={aiAccounts}
@@ -617,6 +753,7 @@ function ChatPanel({
                 <ChatThread
                     items={items}
                     pending={sending}
+                    liveSteps={liveSteps}
                     assistant={assistant}
                     onChoose={(text) => void submit(text)}
                     onOpenFile={onOpenFile}
@@ -841,6 +978,8 @@ export default function AiChatIndex({
     const [extraRepos, setExtraRepos] = useState<string[]>([]);
     // * Which of the picked projects the code viewer shows (the main one unless the person switched).
     const [viewedRepo, setViewedRepo] = useState<string | null>(null);
+    // * GitHub branch the code viewer shows; null is the default branch. A new project starts back on its default.
+    const [viewedBranch, setViewedBranch] = useState<string | null>(null);
     const selectedRepoRef = useRef(selectedRepo);
 
     selectedRepoRef.current = selectedRepo;
@@ -850,6 +989,10 @@ export default function AiChatIndex({
             ? viewedRepo
             : repo;
     const [codeOpen, setCodeOpen] = useState(false);
+
+    useEffect(() => {
+        setViewedBranch(null);
+    }, [viewed]);
     // * A file the person clicked in an edit proposal: the code viewer opens it (the id makes the same file open again).
     // * The chat being created for a project, shown in the sidebar until the saved list arrives.
     const [pendingChat, setPendingChat] = useState<AiChatConversation | null>(
@@ -928,13 +1071,16 @@ export default function AiChatIndex({
         [agents],
     );
     const [log, setLog] = useState<ActivityEntry[]>([]);
-    const terminal = (
-        <ActivityTerminal
-            entries={log}
-            onClear={() => setLog([])}
-            onClose={() => setTerminalOpen(false)}
-        />
-    );
+    const branchPopover =
+        viewed === null ? null : viewed.startsWith('local:') ? (
+            <LocalBranchPopover root={viewed.slice(6)} />
+        ) : (
+            <GithubBranchPopover
+                repo={viewed}
+                branch={viewedBranch}
+                onSelectBranch={setViewedBranch}
+            />
+        );
     const nextLogId = useRef(0);
     const addLog = useCallback(
         (level: ActivityEntry['level'], text: string) =>
@@ -950,6 +1096,54 @@ export default function AiChatIndex({
                 ].slice(-200),
             ),
         [],
+    );
+    const terminalRoot = (viewed ?? repo)?.startsWith('local:')
+        ? (viewed ?? repo)!.slice(6)
+        : null;
+    const runCommand = useMemo(
+        () =>
+            terminalRoot === null
+                ? null
+                : async (command: string) => {
+                      addLog('info', `$ ${command}`);
+
+                      try {
+                          const { data } = await api.post<{
+                              output: string;
+                              exit_code: number | null;
+                              timed_out: boolean;
+                          }>('/ai-chat/local/exec', {
+                              root: terminalRoot,
+                              command,
+                          });
+
+                          if (data.timed_out) {
+                              addLog('error', 'Quá thời gian chờ (60 giây).');
+
+                              return;
+                          }
+
+                          if (data.output !== '') {
+                              addLog(
+                                  data.exit_code === 0 ? 'ok' : 'error',
+                                  data.output,
+                              );
+                          } else if (data.exit_code !== 0) {
+                              addLog('error', `Thoát với mã ${data.exit_code}`);
+                          }
+                      } catch {
+                          addLog('error', 'Không chạy được lệnh.');
+                      }
+                  },
+        [terminalRoot, addLog],
+    );
+    const terminal = (
+        <ActivityTerminal
+            entries={log}
+            onClear={() => setLog([])}
+            onClose={() => setTerminalOpen(false)}
+            onRun={runCommand}
+        />
     );
     // * Stale-while-revalidate: remember the open conversation, and while another one loads from the server show its remembered messages.
     const [opening, setOpening] = useState<string | null>(null);
@@ -1011,7 +1205,7 @@ export default function AiChatIndex({
             setExtraRepos(extras);
             setViewedRepo(null);
             setRecentsTab('projects');
-            addLog('info', `Chọn repo ${name}`);
+            addLog('info', name);
 
             // * Picking a project starts a fresh chat for it. preserveState keeps this page mounted: Inertia remounts a page on a plain GET visit, which reset the sidebar to the Chat tab and dropped the repo.
             if (activeId !== null) {
@@ -1294,46 +1488,30 @@ export default function AiChatIndex({
                                     <Globe aria-hidden="true" />
                                 </Button>
                             )}
-                            {terminalVisible && (
-                                <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon"
-                                    aria-label="Terminal (nhật ký, chỉ đọc)"
-                                    aria-pressed={terminalOpen}
-                                    title="Terminal (nhật ký, chỉ đọc)"
-                                    onClick={() =>
-                                        setTerminalOpen((open) => !open)
-                                    }
-                                    className={cn(
-                                        'size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0',
-                                        terminalOpen &&
-                                            'bg-accent text-accent-foreground',
-                                    )}
-                                >
-                                    <Terminal aria-hidden="true" />
-                                </Button>
-                            )}
+                            {terminalVisible &&
+                                !(codeOpen && repo !== null) && (
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        aria-label="Terminal (nhật ký, chỉ đọc)"
+                                        aria-pressed={terminalOpen}
+                                        title="Terminal (nhật ký, chỉ đọc)"
+                                        onClick={() =>
+                                            setTerminalOpen((open) => !open)
+                                        }
+                                        className={cn(
+                                            'size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0',
+                                            terminalOpen &&
+                                                'bg-accent text-accent-foreground',
+                                        )}
+                                    >
+                                        <Terminal aria-hidden="true" />
+                                    </Button>
+                                )}
                             {repo !== null && (
                                 <>
-                                    {!repo.startsWith('local:') && (
-                                        <Button
-                                            asChild
-                                            variant="ghost"
-                                            size="icon"
-                                            className="size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-sm/chat:invisible @max-sm/chat:w-0 @max-sm/chat:px-0 @max-sm/chat:opacity-0"
-                                        >
-                                            <a
-                                                href={`https://github.com/${repo}`}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                aria-label={`Mở ${repo} trên GitHub`}
-                                                title={`Mở ${repo} trên GitHub`}
-                                            >
-                                                <SourceIcon local={false} />
-                                            </a>
-                                        </Button>
-                                    )}
+                                    {!codeOpen && branchPopover}
                                     <Button
                                         type="button"
                                         variant="ghost"
@@ -1519,7 +1697,7 @@ export default function AiChatIndex({
                         {infoPanel}
                     </SidePanel>
                 )}
-                {wide && terminalVisible && (
+                {wide && terminalVisible && !(codeOpen && repo !== null) && (
                     <SidePanel
                         open={terminalOpen}
                         width={terminalWidth.width}
@@ -1628,18 +1806,59 @@ export default function AiChatIndex({
                     </Sheet>
                 )}
                 {codeOpen && repo !== null && (
-                    <CodeViewer
-                        // * A new project starts with its own tree, open folders and file.
-                        key={viewed}
-                        repo={viewed ?? repo}
-                        repos={[repo, ...extraRepos]}
-                        onViewRepo={setViewedRepo}
-                        changes={changes}
-                        openRequest={openRequest}
-                        onAsk={(reference) =>
-                            setAskRequest({ id: Date.now(), reference })
-                        }
-                    />
+                    // * With the project files open, the Terminal docks under them (top/bottom) instead of beside them.
+                    <div className="flex min-h-0 max-w-full min-w-0 shrink flex-col">
+                        <div className="flex min-h-0 flex-1 justify-end">
+                            <CodeViewer
+                                // * A new project starts with its own tree, open folders and file.
+                                key={viewed}
+                                repo={viewed ?? repo}
+                                repos={[repo, ...extraRepos]}
+                                onViewRepo={setViewedRepo}
+                                branch={viewedBranch}
+                                headerActions={
+                                    <>
+                                        {branchPopover}
+                                        {terminalVisible && (
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon"
+                                                aria-label="Terminal (nhật ký, chỉ đọc)"
+                                                aria-pressed={terminalOpen}
+                                                title="Terminal (nhật ký, chỉ đọc)"
+                                                onClick={() =>
+                                                    setTerminalOpen(
+                                                        (open) => !open,
+                                                    )
+                                                }
+                                                className={cn(
+                                                    'size-8 shrink-0 text-muted-foreground',
+                                                    terminalOpen &&
+                                                        'bg-accent text-accent-foreground',
+                                                )}
+                                            >
+                                                <Terminal aria-hidden="true" />
+                                            </Button>
+                                        )}
+                                    </>
+                                }
+                                changes={changes}
+                                openRequest={openRequest}
+                                onAsk={(reference) =>
+                                    setAskRequest({
+                                        id: Date.now(),
+                                        reference,
+                                    })
+                                }
+                            />
+                        </div>
+                        {wide && terminalVisible && terminalOpen && (
+                            <div className="h-64 min-h-0 min-w-[24rem] shrink-0 border-t border-l">
+                                {terminal}
+                            </div>
+                        )}
+                    </div>
                 )}
             </div>
         </FileViewerContext.Provider>

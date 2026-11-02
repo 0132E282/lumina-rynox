@@ -128,6 +128,27 @@ class GithubReader
         return Str::limit(implode("\n\n", array_filter($sections)), self::MAX_CONTEXT, "\n… (đã cắt bớt)");
     }
 
+    /**
+     * Branches of a repo (the first 100, default branch first), for the branch popup.
+     *
+     * @return array{default: string, branches: list<array{name: string, protected: bool}>}
+     *
+     * @throws GithubException
+     */
+    public function branches(string $repo): array
+    {
+        $default = $this->defaultBranch($repo);
+        $rows = (array) $this->get("/repos/{$repo}/branches", ['per_page' => 100])->json();
+        $branches = collect($rows)
+            ->map(fn (array $row): array => ['name' => (string) ($row['name'] ?? ''), 'protected' => (bool) ($row['protected'] ?? false)])
+            ->filter(fn (array $row): bool => $row['name'] !== '')
+            ->sortBy(fn (array $row): string => ($row['name'] === $default ? '0' : '1').$row['name'])
+            ->values()
+            ->all();
+
+        return ['default' => $default, 'branches' => $branches];
+    }
+
     /** @throws GithubException */
     public function defaultBranch(string $repo): string
     {
@@ -165,42 +186,42 @@ class GithubReader
     }
 
     /**
-     * File paths of the repo's default branch, for the read-only code viewer.
+     * File paths of a branch (the default one when none is given), for the read-only code viewer.
      *
      * @return array{branch: string, paths: list<string>}
      *
      * @throws GithubException
      */
-    public function browse(string $repo): array
+    public function browse(string $repo, ?string $branch = null): array
     {
-        return Cache::remember("github.browse.{$repo}", self::REPOS_TTL_SECONDS, function () use ($repo): array {
-            $branch = $this->defaultBranch($repo);
+        return Cache::remember("github.browse.{$repo}.".($branch ?? ''), self::REPOS_TTL_SECONDS, function () use ($repo, $branch): array {
+            $branch ??= $this->defaultBranch($repo);
 
             return ['branch' => $branch, 'paths' => array_slice(array_keys($this->tree($repo, $branch)), 0, self::MAX_BROWSE_PATHS)];
         });
     }
 
     /**
-     * One small UTF-8 text file of the default branch (null when missing, large or binary).
+     * One small UTF-8 text file of a branch (the default one when none is given); null when missing, large or binary.
      *
      * @throws GithubException
      */
-    public function readFile(string $repo, string $path): ?string
+    public function readFile(string $repo, string $path, ?string $branch = null): ?string
     {
-        return $this->currentFile($repo, $this->defaultBranch($repo), $path)['content'] ?? null;
+        return $this->currentFile($repo, $branch ?? $this->defaultBranch($repo), $path)['content'] ?? null;
     }
 
     /**
-     * An image of the default branch as raw bytes for the viewer (null when missing, too large or not a file).
+     * An image of a branch (the default one when none is given) as raw bytes for the viewer (null when missing, too large or not a file).
      *
      * @throws GithubException
      */
-    public function readImage(string $repo, string $path): ?string
+    public function readImage(string $repo, string $path, ?string $branch = null): ?string
     {
         $encoded = implode('/', array_map('rawurlencode', explode('/', $path)));
 
         try {
-            $json = $this->get("/repos/{$repo}/contents/{$encoded}", ['ref' => $this->defaultBranch($repo)])->json();
+            $json = $this->get("/repos/{$repo}/contents/{$encoded}", ['ref' => $branch ?? $this->defaultBranch($repo)])->json();
         } catch (GithubException $exception) {
             if ($exception->getCode() === 404) {
                 return null;

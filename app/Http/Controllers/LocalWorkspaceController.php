@@ -82,6 +82,13 @@ class LocalWorkspaceController extends Controller
         return $this->guarded($request, fn (): array => $this->workspace->changes($data['root']));
     }
 
+    public function branches(Request $request): JsonResponse
+    {
+        $data = $request->validate(['root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/']]);
+
+        return $this->guarded($request, fn (): array => $this->workspace->branches($data['root']));
+    }
+
     public function head(Request $request): JsonResponse
     {
         $data = $request->validate([
@@ -94,6 +101,17 @@ class LocalWorkspaceController extends Controller
 
             return ['path' => $data['path'], 'content' => $content ?? '', 'tracked' => $content !== null];
         });
+    }
+
+    /** * Runs one Terminal command in a local project's folder (output, exit code, timeout flag). */
+    public function exec(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'command' => ['required', 'string', 'max:2000'],
+        ]);
+
+        return $this->guarded($request, fn (): array => $this->workspace->run($data['root'], $data['command']));
     }
 
     /** * Saves the person's own edit of one file: same guards and atomic write as an approved proposal; `original` is the text the editor started from, a different file on disk is a 409. */

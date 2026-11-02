@@ -3,10 +3,16 @@ import type { ComponentProps } from 'react';
 import { doneTyping, isTyping } from '@/lib/typing';
 import { ProposalText } from '@/components/ai-chat/proposal-text';
 import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
+import { VoiceAnswer } from '@/components/ai-chat/voice-answer';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
 import { asksForImage } from '@/lib/image-request';
 import { ProposalCard } from '@/components/ai-chat/proposal-card';
-import type { AiChatMessage, AiChatProposal } from '@/types';
+import type {
+    AiChatActivityStep,
+    AiChatMessage,
+    AiChatProposal,
+} from '@/types';
+import { WorkSteps } from '@/components/ai-chat/work-steps';
 import { cn } from '@/lib/utils';
 
 /** * Persisted messages plus local ones (not yet saved user bubble, error line), which have string ids. */
@@ -15,6 +21,8 @@ export type ThreadItem = {
     role: AiChatMessage['role'] | 'error';
     content: string;
     proposals?: AiChatProposal[];
+    /** * What the app did for this answer (this visit only; it is not stored). */
+    steps?: AiChatActivityStep[];
 };
 
 const THINKING_AFTER_SECONDS = 2;
@@ -63,8 +71,11 @@ function TypedProposalText({
 function PendingStatus({
     assistant,
     imageRequest,
+    steps,
 }: {
     assistant?: AssistantIdentity;
+    /** What the app has done so far for this message (streamed while it works). */
+    steps: AiChatActivityStep[];
     /** The last message asks for a picture: shows "Đang tạo ảnh…" (a hint only, the assistant answers with text or SVG). */
     imageRequest: boolean;
 }) {
@@ -121,9 +132,14 @@ function PendingStatus({
                               : 'Đang gửi…'}
                     </span>
                     {(thinking || imageRequest) && (
-                        <span className="tabular-nums">{seconds}s</span>
+                        <span className="tabular-nums">
+                            {seconds >= 60
+                                ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+                                : `${seconds}s`}
+                        </span>
                     )}
                 </span>
+                <WorkSteps steps={steps} live className="mt-2" />
                 {imageRequest && (
                     // * Placeholder frame for the picture: a dot grid with drifting bright patches and a progress estimate (the real time is unknown, so it eases toward 95%).
                     <span
@@ -147,6 +163,7 @@ export function ChatThread({
     onProposalsChange,
     onOpenFile,
     onChoose,
+    liveSteps = [],
     assistant,
 }: {
     items: ThreadItem[];
@@ -159,6 +176,8 @@ export function ChatThread({
     onOpenFile?: (repo: string, path: string) => void;
     /** Sends a picked ```choices option as the next user message; without it the cards stay read-only. */
     onChoose?: (text: string) => void;
+    /** * Steps of the answer being waited for. */
+    liveSteps?: AiChatActivityStep[];
     /** Decorative avatars: the signed-in person's name/photo and the AI account's vendor. */
     assistant?: AssistantIdentity;
 }) {
@@ -282,33 +301,48 @@ export function ChatThread({
                                             : `${assistant?.name || 'Trợ lý AI'}: `}
                                     </span>
                                 )}
-                                {item.role === 'assistant' ? (
-                                    <TypedProposalText
-                                        id={item.id}
-                                        content={item.content}
-                                        hasCard={
-                                            (item.proposals?.length ?? 0) > 0
-                                        }
-                                        choices={
-                                            onChoose
-                                                ? {
-                                                      // * Only the newest answer, while nothing is sending, can still be answered.
-                                                      interactive:
-                                                          !pending &&
-                                                          index ===
-                                                              items.length - 1,
-                                                      answer:
-                                                          items[index + 1]
-                                                              ?.role === 'user'
-                                                              ? items[
-                                                                    index + 1
-                                                                ].content.trim()
-                                                              : null,
-                                                      onChoose,
-                                                  }
-                                                : undefined
-                                        }
+                                {item.role === 'assistant' && item.steps && (
+                                    <WorkSteps
+                                        steps={item.steps}
+                                        className="mb-2"
                                     />
+                                )}
+                                {item.role === 'assistant' ? (
+                                    <VoiceAnswer
+                                        id={item.id}
+                                        text={item.content}
+                                    >
+                                        <TypedProposalText
+                                            id={item.id}
+                                            content={item.content}
+                                            hasCard={
+                                                (item.proposals?.length ?? 0) >
+                                                0
+                                            }
+                                            choices={
+                                                onChoose
+                                                    ? {
+                                                          // * Only the newest answer, while nothing is sending, can still be answered.
+                                                          interactive:
+                                                              !pending &&
+                                                              index ===
+                                                                  items.length -
+                                                                      1,
+                                                          answer:
+                                                              items[index + 1]
+                                                                  ?.role ===
+                                                              'user'
+                                                                  ? items[
+                                                                        index +
+                                                                            1
+                                                                    ].content.trim()
+                                                                  : null,
+                                                          onChoose,
+                                                      }
+                                                    : undefined
+                                            }
+                                        />
+                                    </VoiceAnswer>
                                 ) : (
                                     item.content
                                 )}
@@ -327,6 +361,7 @@ export function ChatThread({
                                             onProposalsChange(item.id, next)
                                         }
                                         onOpenFile={onOpenFile}
+                                        onExecutePlan={onChoose}
                                     />
                                 </div>
                             )}
@@ -335,6 +370,7 @@ export function ChatThread({
                 {pending && (
                     <PendingStatus
                         assistant={assistant}
+                        steps={liveSteps}
                         imageRequest={
                             lastUser ? asksForImage(lastUser.content) : false
                         }

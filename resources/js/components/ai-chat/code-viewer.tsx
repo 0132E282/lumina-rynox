@@ -10,6 +10,7 @@ import {
     X,
 } from 'lucide-react';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
     file as fileRoute,
     tree as treeRoute,
@@ -228,6 +229,8 @@ export function CodeViewer({
     repo,
     repos,
     onViewRepo,
+    headerActions,
+    branch = null,
     changes,
     openRequest = null,
     onAsk,
@@ -237,6 +240,10 @@ export function CodeViewer({
     /** * Every project picked for the chat; with more than one the header offers a dropdown to switch. */
     repos: string[];
     onViewRepo: (repo: string) => void;
+    /** * Extra buttons in the tree header (branch and Terminal), next to the project name. */
+    headerActions?: ReactNode;
+    /** * GitHub branch to browse (null: the default one). */
+    branch?: string | null;
     /** * Files the AI changed in this conversation (shown with M/A marks and a diff). */
     changes: AiChatProposal[];
     /** * A file to open right away (clicked in an edit proposal of the chat). */
@@ -269,6 +276,9 @@ export function CodeViewer({
     const [filter, setFilter] = useState('');
     const [openDirs, setOpenDirs] = useState<Set<string>>(new Set());
     const [selected, setSelected] = useState<string | null>(null);
+    // * Files open as tabs (the active one is `selected`); an unsaved edit of a tab that is not active waits in `drafts`.
+    const [tabs, setTabs] = useState<string[]>([]);
+    const drafts = useRef(new Map<string, string>());
     const [content, setContent] = useState<string | null>(null);
     // * The column left of the tree shows the open file, or (local projects) every file that differs from git HEAD.
     const [view, setView] = useState<'files' | 'changes'>('files');
@@ -297,7 +307,7 @@ export function CodeViewer({
         // * "local:{id}" is a folder of this machine (read-only here); anything else is a GitHub repo.
         // * The tree of a repo is fetched once and kept a few minutes: closing and reopening the viewer, or switching tabs, does not refetch it.
         const request = cachedRequest(
-            `tree.${repo}`,
+            `tree.${repo}.${branch ?? ''}`,
             localRoot ? 30_000 : 5 * 60 * 1000,
             () =>
                 (localRoot
@@ -305,7 +315,9 @@ export function CodeViewer({
                           params: { root: localRoot },
                       })
                     : api.get<{ paths: string[] }>(
-                          treeRoute.url({ query: { repo } }),
+                          treeRoute.url({
+                              query: { repo, ...(branch ? { branch } : {}) },
+                          }),
                       )
                 ).then(({ data }) => data.paths),
         );
@@ -322,7 +334,7 @@ export function CodeViewer({
         return () => {
             cancelled = true;
         };
-    }, [repo, localRoot]);
+    }, [repo, localRoot, branch]);
 
     const changed = useMemo(
         () =>
@@ -377,6 +389,18 @@ export function CodeViewer({
         ],
         [paths, changed],
     );
+
+    // * Another project: its files are not these tabs.
+    const shownRepo = useRef(repo);
+
+    useEffect(() => {
+        if (shownRepo.current !== repo) {
+            shownRepo.current = repo;
+            drafts.current.clear();
+            setTabs([]);
+            setSelected(null);
+        }
+    }, [repo]);
 
     const query = filter.trim().toLowerCase();
     const tree = useMemo(
@@ -491,13 +515,21 @@ export function CodeViewer({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [openRequest, paths, repo]);
 
-    const openFile = async (path: string) => {
+    const openFile = async (path: string, discardCurrent = false) => {
         const change = changed.get(path);
 
         // * A local edit that is applied is already in the file: show the file itself, not a diff against itself.
         const applied = localRoot !== null && change?.status === 'applied';
 
         loadedStatus.current = change?.status;
+
+        if (!discardCurrent && selected !== null && draft !== null) {
+            drafts.current.set(selected, draft);
+        }
+
+        setTabs((current) =>
+            current.includes(path) ? current : [...current, path],
+        );
         setView('files');
         setSelected(path);
         setContent(null);
@@ -523,7 +555,13 @@ export function CodeViewer({
                     .get<{ content?: string; image?: string }>(
                         localRoot
                             ? '/ai-chat/local/file'
-                            : fileRoute.url({ query: { repo, path } }),
+                            : fileRoute.url({
+                                  query: {
+                                      repo,
+                                      path,
+                                      ...(branch ? { branch } : {}),
+                                  },
+                              }),
                         localRoot
                             ? { params: { root: localRoot, path } }
                             : undefined,
@@ -532,10 +570,20 @@ export function CodeViewer({
 
             const file = localRoot
                 ? await load()
-                : await cachedRequest(`file.${repo}.${path}`, 60_000, load);
+                : await cachedRequest(
+                      `file.${repo}.${branch ?? ''}.${path}`,
+                      60_000,
+                      load,
+                  );
 
             setImage(file.image ?? null);
             setContent(file.content ?? '');
+
+            const unsaved = drafts.current.get(path);
+
+            if (unsaved !== undefined && unsaved !== file.content) {
+                setDraft(unsaved);
+            }
 
             if (localRoot && file.content !== undefined) {
                 api.get<{ content: string; tracked: boolean }>(
@@ -591,6 +639,7 @@ export function CodeViewer({
             });
             setContent(draft);
             setDraft(null);
+            drafts.current.delete(selected);
         } catch (caught) {
             setSaveError(errorText(caught, 'Không lưu được tệp.'));
         } finally {
@@ -602,6 +651,39 @@ export function CodeViewer({
     const editable = localRoot !== null && proposed === null && image === null;
 
     const showChanges = localRoot !== null && view === 'changes';
+
+    const isDirty = (path: string) =>
+        path === selected ? draft !== null : drafts.current.has(path);
+
+    const closeTab = (path: string) => {
+        if (
+            isDirty(path) &&
+            !window.confirm(
+                `${path.split('/').pop()} chưa lưu. Đóng và bỏ thay đổi?`,
+            )
+        ) {
+            return;
+        }
+
+        drafts.current.delete(path);
+        const index = tabs.indexOf(path);
+        const rest = tabs.filter((item) => item !== path);
+
+        setTabs(rest);
+
+        if (path !== selected) {
+            return;
+        }
+
+        const next = rest[Math.min(index, rest.length - 1)];
+
+        if (next === undefined) {
+            setSelected(null);
+            setDraft(null);
+        } else {
+            void openFile(next, true);
+        }
+    };
 
     const toggleDir = (path: string) =>
         setOpenDirs((current) => {
@@ -647,6 +729,65 @@ export function CodeViewer({
                         label="Đổi độ rộng khung xem tệp"
                         {...fileWidth.handleProps}
                     />
+                    <div
+                        role="tablist"
+                        aria-label="Tệp đang mở"
+                        className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b px-2"
+                    >
+                        {tabs.map((path) => {
+                            const name = path.split('/').pop() ?? path;
+                            const active = path === selected;
+
+                            return (
+                                <div
+                                    key={path}
+                                    className={cn(
+                                        'group flex h-8 max-w-48 shrink-0 items-center gap-1.5 rounded-lg pr-1 pl-2 text-sm transition-colors duration-150 motion-reduce:transition-none',
+                                        active
+                                            ? 'bg-muted text-foreground'
+                                            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                                    )}
+                                >
+                                    <button
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={active}
+                                        title={path}
+                                        onClick={() =>
+                                            active
+                                                ? undefined
+                                                : void openFile(path)
+                                        }
+                                        className="flex min-w-0 items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    >
+                                        <FileIcon
+                                            name={name}
+                                            className="size-4 shrink-0"
+                                        />
+                                        <span className="truncate">{name}</span>
+                                        {isDirty(path) && (
+                                            <span
+                                                role="img"
+                                                aria-label="Chưa lưu"
+                                                className="size-1.5 shrink-0 rounded-full bg-foreground/60"
+                                            />
+                                        )}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-label={`Đóng ${name}`}
+                                        onClick={() => closeTab(path)}
+                                        className="rounded-sm p-0.5 text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    >
+                                        <X
+                                            aria-hidden="true"
+                                            className="size-3.5"
+                                        />
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
                     <div className="flex h-12 items-center justify-between gap-2 border-b px-3 text-xs text-muted-foreground">
                         <span className="truncate" dir="rtl">
                             <bdi>
@@ -719,7 +860,7 @@ export function CodeViewer({
                                 variant="ghost"
                                 size="icon"
                                 aria-label="Đóng tệp"
-                                onClick={() => setSelected(null)}
+                                onClick={() => closeTab(selected)}
                                 className="size-7"
                             >
                                 <X aria-hidden="true" />
@@ -854,18 +995,21 @@ export function CodeViewer({
                             {sourceName}
                         </span>
                     )}
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label="Thu gọn tất cả thư mục"
-                        title="Thu gọn tất cả thư mục"
-                        disabled={openDirs.size === 0}
-                        onClick={() => setOpenDirs(new Set())}
-                        className="ml-auto size-8 shrink-0 text-muted-foreground"
-                    >
-                        <ChevronsDownUp aria-hidden="true" />
-                    </Button>
+                    <span className="ml-auto flex shrink-0 items-center gap-0.5">
+                        {headerActions}
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            aria-label="Thu gọn tất cả thư mục"
+                            title="Thu gọn tất cả thư mục"
+                            disabled={openDirs.size === 0}
+                            onClick={() => setOpenDirs(new Set())}
+                            className="size-8 shrink-0 text-muted-foreground"
+                        >
+                            <ChevronsDownUp aria-hidden="true" />
+                        </Button>
+                    </span>
                 </header>
                 {localRoot !== null && (
                     <Tabs

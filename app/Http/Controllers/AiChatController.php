@@ -30,6 +30,7 @@ use App\Services\Ai\ProjectTools;
 use App\Services\Integrations\IntegrationManager;
 use App\Support\LineDiff;
 use App\Support\ResourcePermission;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -39,6 +40,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * * Home-page AI chat (`/`). History is stored per admin; every lookup is scoped by `user_id`, so another admin's thread is a 404.
@@ -175,10 +177,25 @@ class AiChatController extends Controller
     /** * File paths of a repo for the read-only code viewer. */
     public function tree(Request $request): JsonResponse
     {
+        $data = $request->validate([
+            'repo' => ['required', 'string', 'max:140', 'regex:#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$#'],
+            'branch' => ['nullable', 'string', 'max:200', 'regex:#^[A-Za-z0-9._/-]+$#', 'not_regex:#(^|/)\.\.(/|$)#'],
+        ]);
+
+        try {
+            return response()->json($this->github->browse($data['repo'], $data['branch'] ?? null));
+        } catch (GithubException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+    }
+
+    /** * Branches of a repo for the branch popup (read-only). */
+    public function branches(Request $request): JsonResponse
+    {
         $data = $request->validate(['repo' => ['required', 'string', 'max:140', 'regex:#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$#']]);
 
         try {
-            return response()->json($this->github->browse($data['repo']));
+            return response()->json($this->github->branches($data['repo']));
         } catch (GithubException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }
@@ -190,20 +207,21 @@ class AiChatController extends Controller
         $data = $request->validate([
             'repo' => ['required', 'string', 'max:140', 'regex:#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$#'],
             'path' => ['required', 'string', 'max:300', 'not_regex:#(^|/)\.\.(/|$)#', 'not_regex:#^/#'],
+            'branch' => ['nullable', 'string', 'max:200', 'regex:#^[A-Za-z0-9._/-]+$#', 'not_regex:#(^|/)\.\.(/|$)#'],
         ]);
 
         $mime = ImageFiles::mime($data['path']);
 
         try {
             if ($mime !== null) {
-                $bytes = $this->github->readImage($data['repo'], $data['path']);
+                $bytes = $this->github->readImage($data['repo'], $data['path'], $data['branch'] ?? null);
 
                 return $bytes === null
                     ? response()->json(['message' => 'Không xem được ảnh này (quá lớn hoặc không đọc được, tối đa 1 MB).'], 422)
                     : response()->json(['path' => $data['path'], 'image' => ImageFiles::dataUrl($mime, $bytes)]);
             }
 
-            $content = $this->github->readFile($data['repo'], $data['path']);
+            $content = $this->github->readFile($data['repo'], $data['path'], $data['branch'] ?? null);
         } catch (GithubException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }
@@ -235,6 +253,39 @@ class AiChatController extends Controller
         }
 
         return response()->json(['prompt' => $prompt]);
+    }
+
+    /**
+     * The same send, answered as a stream of lines (`application/x-ndjson`): one `step` line for each thing the app does while it works, then one `done` line with the status and body `send` would have returned.
+     * ! Validation and permission failed before this point as ordinary JSON; anything that goes wrong inside becomes a `done` line with its status, never a stack trace.
+     */
+    public function sendStream(SendAiChatMessageRequest $request): StreamedResponse
+    {
+        return response()->stream(function () use ($request): void {
+            $emit = function (array $event): void {
+                echo json_encode($event, JSON_UNESCAPED_UNICODE)."\n";
+
+                if (ob_get_level() > 0) {
+                    @ob_flush();
+                }
+
+                flush();
+            };
+
+            app(ChatActivity::class)->listen(fn (array $step) => $emit(['type' => 'step', ...$step]));
+            app(ChatActivity::class)->listenPlan(fn (array $todos) => $emit(['type' => 'plan', 'todos' => $todos]));
+            app(ChatActivity::class)->listenAgents(fn (array $agent) => $emit(['type' => 'agent', ...$agent]));
+
+            try {
+                $response = $this->send($request);
+                $emit(['type' => 'done', 'status' => $response->getStatusCode(), 'data' => $response->getData(true)]);
+            } catch (ModelNotFoundException) {
+                $emit(['type' => 'done', 'status' => 404, 'data' => ['message' => 'Không tìm thấy cuộc trò chuyện.']]);
+            } catch (\Throwable $exception) {
+                report($exception);
+                $emit(['type' => 'done', 'status' => 500, 'data' => ['message' => 'Không gọi được trợ lý AI.']]);
+            }
+        }, 200, ['Content-Type' => 'application/x-ndjson', 'Cache-Control' => 'no-cache', 'X-Accel-Buffering' => 'no']);
     }
 
     public function send(SendAiChatMessageRequest $request): JsonResponse
@@ -290,25 +341,28 @@ class AiChatController extends Controller
             }
         }
 
+        // * An approved plan handed to the AI ("Duyệt và làm"): it works from the plan's task list in the message, so the project's file tree and files are not read for it.
+        $planRun = preg_match('~^Plan docs/plans/[\w.-]+\.json đã được duyệt~u', $text) === 1;
+
         try {
             if ($localRoot !== null) {
-                $sections[] = $this->workspace->context($localRoot, $text);
+                $planRun || $sections[] = $this->workspace->context($localRoot, $text);
                 $where[] = 'local '.$localRoot;
             }
 
             if ($repo !== null) {
-                $sections[] = $this->github->context($repo, $text);
+                $planRun || $sections[] = $this->github->context($repo, $text);
                 $where[] = 'GitHub '.$repo;
             }
 
             // * More projects picked together are context only: edits are proposed against the first one.
             foreach ($extraRoots as $extraRoot) {
-                $sections[] = $this->workspace->context($extraRoot, $text);
+                $planRun || $sections[] = $this->workspace->context($extraRoot, $text);
                 $where[] = 'local '.$extraRoot;
             }
 
             foreach ($extraRepos as $extraRepo) {
-                $sections[] = $this->github->context($extraRepo, $text);
+                $planRun || $sections[] = $this->github->context($extraRepo, $text);
                 $where[] = 'GitHub '.$extraRepo;
             }
 
@@ -324,6 +378,8 @@ class AiChatController extends Controller
             if ($tools['section'] !== null) {
                 $sections[] = $tools['section'];
             }
+
+            app(ChatActivity::class)->record('ask', 'AI', 'Gửi yêu cầu cho AI và chờ trả lời');
 
             $answer = Str::limit($this->assistant->chat(
                 $history,

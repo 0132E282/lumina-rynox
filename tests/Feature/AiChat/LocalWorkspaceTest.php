@@ -113,6 +113,18 @@ class LocalWorkspaceTest extends AiTestCase
         $this->actingAs($user)->getJson(route('ai-chat.local.tree', ['root' => 'work']))->assertForbidden();
     }
 
+    public function test_the_terminal_runs_a_command_inside_the_root_only_for_loopback(): void
+    {
+        $user = $this->admin();
+
+        $this->actingAs($user)->postJson(route('ai-chat.local.exec'), ['root' => 'work', 'command' => 'pwd'])
+            ->assertOk()
+            ->assertJsonPath('exit_code', 0)
+            ->assertJsonPath('output', $this->root);
+        $this->actingAs($user)->postJson(route('ai-chat.local.exec'), ['root' => 'nope', 'command' => 'pwd'])->assertNotFound();
+        $this->withServerVariables(['REMOTE_ADDR' => '10.1.2.3'])->actingAs($user)->postJson(route('ai-chat.local.exec'), ['root' => 'work', 'command' => 'pwd'])->assertForbidden();
+    }
+
     public function test_status_lists_root_ids_only_never_server_paths(): void
     {
         $response = $this->actingAs($this->admin())->getJson(route('ai-chat.local.status'))->assertOk()->assertJsonPath('enabled', true)->assertJsonPath('roots.0.id', 'work');

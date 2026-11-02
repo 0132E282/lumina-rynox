@@ -123,12 +123,12 @@ export function RepoPicker({
                     variant="ghost"
                     size="sm"
                     disabled={disabled}
-                    aria-label="Chọn dự án"
+                    aria-label="Thêm dự án"
                     className="h-7 max-w-44 gap-1.5 border border-border/60 bg-muted/40 px-2 text-muted-foreground hover:bg-muted/70"
                     onClick={() => setOpen(true)}
                 >
                     <SourceIcon local={repo?.startsWith('local:') === true} />
-                    <span className="truncate">Dự án</span>
+                    <span className="truncate">Thêm dự án</span>
                 </Button>
             )}
             <LocalProjectDialog

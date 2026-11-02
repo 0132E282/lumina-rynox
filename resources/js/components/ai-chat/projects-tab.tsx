@@ -151,6 +151,22 @@ export function ProjectsTab({
             onFinish: () => setDeleting(false),
         });
     };
+    // * One conversation of a project (the trash button on its row), asked to confirm like the whole-project delete.
+    const [pendingChat, setPendingChat] = useState<AiChatConversation | null>(
+        null,
+    );
+    const confirmDeleteChat = () => {
+        if (pendingChat === null) {
+            return;
+        }
+
+        setDeleting(true);
+        router.delete(`/ai-chat/conversations/${pendingChat.id}`, {
+            preserveScroll: true,
+            onSuccess: () => setPendingChat(null),
+            onFinish: () => setDeleting(false),
+        });
+    };
     const pendingCount = conversations.filter(
         (conversation) => conversation.repo === pendingDelete,
     ).length;
@@ -355,6 +371,7 @@ export function ProjectsTab({
                                                             key={
                                                                 conversation.id
                                                             }
+                                                            className="group relative"
                                                         >
                                                             <Link
                                                                 href={home.url({
@@ -373,7 +390,7 @@ export function ProjectsTab({
                                                                         : undefined
                                                                 }
                                                                 className={cn(
-                                                                    'block truncate rounded-lg px-2 py-1.5 text-sm text-foreground/80 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
+                                                                    'text-foreground/80transition-colors block truncate rounded-lg px-2 py-1.5 pr-9 text-sm duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
                                                                     conversation.id ===
                                                                         activeId &&
                                                                         'bg-accent text-accent-foreground',
@@ -383,6 +400,20 @@ export function ProjectsTab({
                                                                     conversation.title
                                                                 }
                                                             </Link>
+                                                            <Button
+                                                                type="button"
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                aria-label={`Xoá cuộc trò chuyện ${conversation.title}`}
+                                                                onClick={() =>
+                                                                    setPendingChat(
+                                                                        conversation,
+                                                                    )
+                                                                }
+                                                                className="absolute top-1/2 right-1 size-7 -translate-y-1/2 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-destructive"
+                                                            >
+                                                                <Trash2 aria-hidden="true" />
+                                                            </Button>
                                                         </li>
                                                     ),
                                                 )
@@ -395,6 +426,39 @@ export function ProjectsTab({
                     </ul>
                 )}
             </div>
+            <Dialog
+                open={pendingChat !== null}
+                onOpenChange={(open) => !open && setPendingChat(null)}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Xoá cuộc trò chuyện?</DialogTitle>
+                        <DialogDescription>
+                            Cuộc trò chuyện “{pendingChat?.title}” sẽ bị xoá
+                            vĩnh viễn cùng tin nhắn và đề xuất sửa tệp. Không
+                            hoàn tác được.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setPendingChat(null)}
+                            disabled={deleting}
+                        >
+                            Huỷ
+                        </Button>
+                        <Button
+                            type="button"
+                            variant="destructive"
+                            onClick={confirmDeleteChat}
+                            disabled={deleting}
+                        >
+                            Xoá
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
             <Dialog
                 open={pendingDelete !== null}
                 onOpenChange={(open) => !open && setPendingDelete(null)}

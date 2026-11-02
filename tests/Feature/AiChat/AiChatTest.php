@@ -121,6 +121,37 @@ class AiChatTest extends AiTestCase
         $this->assertMatchesRegularExpression('/^[0-9a-f-]{36}$/', $conversation->uuid);
     }
 
+    public function test_the_streamed_send_writes_a_step_line_then_the_same_answer_as_a_done_line(): void
+    {
+        $this->fakeAssistant('Xin chào!');
+        $me = $this->admin();
+
+        $response = $this->actingAs($me)->post(route('ai-chat.send.stream'), ['message' => 'hi'], ['Accept' => 'application/x-ndjson']);
+
+        $response->assertOk();
+        $lines = array_map(fn (string $line): array => json_decode($line, true), array_values(array_filter(explode("\n", $response->streamedContent()))));
+        $this->assertSame('step', $lines[0]['type']);
+        $this->assertSame('ask', $lines[0]['kind']);
+        $last = end($lines);
+        $this->assertSame('done', $last['type']);
+        $this->assertSame(200, $last['status']);
+        $this->assertSame('Xin chào!', $last['data']['assistant_message']['content']);
+        $this->assertSame(1, AiConversation::query()->count());
+    }
+
+    public function test_the_streamed_send_reports_an_ai_failure_as_a_done_line_with_its_status(): void
+    {
+        $this->fakeAssistant(new AiException(AiException::TIMEOUT));
+
+        $response = $this->actingAs($this->admin())->post(route('ai-chat.send.stream'), ['message' => 'hi']);
+
+        $lines = array_values(array_filter(explode("\n", $response->streamedContent())));
+        $last = json_decode((string) end($lines), true);
+        $this->assertSame('done', $last['type']);
+        $this->assertSame(422, $last['status']);
+        $this->assertNotSame('', $last['data']['message']);
+    }
+
     public function test_a_follow_up_sends_the_history_and_appends_to_the_same_conversation(): void
     {
         $seen = null;

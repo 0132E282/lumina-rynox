@@ -88,4 +88,10 @@ return [
         'send_per_minute' => (int) env('MAUTRIX_META_SEND_PER_MINUTE', 10),
     ],
 
+    // * ElevenLabs text-to-speech and voice cloning for the AI chat's spoken answers. Without a key the chat keeps using the device's own voice.
+    'elevenlabs' => [
+        'key' => env('ELEVENLABS_API_KEY'),
+        'model' => env('ELEVENLABS_MODEL', 'eleven_multilingual_v2'),
+    ],
+
 ];

@@ -7,6 +7,7 @@ namespace App\Services\Ai;
 use App\Models\AiLocalRoot;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Process\Exceptions\ProcessTimedOutException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -22,6 +23,11 @@ use Illuminate\Support\Str;
 class LocalWorkspace
 {
     public const MAX_READ_BYTES = 1_000_000;
+
+    /** Seconds a Terminal command may run, and the characters of its output that are kept. */
+    private const COMMAND_TIMEOUT = 60;
+
+    private const MAX_COMMAND_OUTPUT = 20000;
 
     public const MAX_WRITE_BYTES = 100_000;
 
@@ -518,6 +524,57 @@ class LocalWorkspace
     }
 
     /**
+     * Local branches and worktrees of the root's git repo (read-only `git branch` / `git worktree list`); a worktree shows its folder name, never its full path.
+     *
+     * @return array{git: bool, current: string|null, branches: list<string>, worktrees: list<array{name: string, branch: string|null, current: bool}>}
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function branches(string $rootId): array
+    {
+        $root = $this->rootPath($rootId);
+        $list = Process::path($root)->timeout(15)->run(['git', '--no-optional-locks', 'branch', '--format=%(HEAD)|%(refname:short)']);
+
+        if (! $list->successful()) {
+            return ['git' => false, 'current' => null, 'branches' => [], 'worktrees' => []];
+        }
+
+        $current = null;
+        $branches = [];
+
+        foreach (preg_split('/\R/', trim($list->output())) ?: [] as $line) {
+            [$head, $name] = array_pad(explode('|', $line, 2), 2, '');
+
+            if ($name === '' || str_starts_with($name, '(')) {
+                continue;
+            }
+
+            $branches[] = $name;
+            $current = $head === '*' ? $name : $current;
+        }
+
+        $worktrees = [];
+        $tree = Process::path($root)->timeout(15)->run(['git', '--no-optional-locks', 'worktree', 'list', '--porcelain']);
+
+        if ($tree->successful()) {
+            foreach (preg_split('/\R\R/', trim($tree->output())) ?: [] as $block) {
+                preg_match('/^worktree (.+)$/m', $block, $path);
+                preg_match('/^branch refs\/heads\/(.+)$/m', $block, $branch);
+
+                if (isset($path[1])) {
+                    $worktrees[] = [
+                        'name' => basename($path[1]),
+                        'branch' => $branch[1] ?? null,
+                        'current' => rtrim((string) realpath($path[1]), DIRECTORY_SEPARATOR) === $root,
+                    ];
+                }
+            }
+        }
+
+        return ['git' => true, 'current' => $current, 'branches' => $branches, 'worktrees' => $worktrees];
+    }
+
+    /**
      * Files that differ from `HEAD` in the root's git working tree (read-only `git status`/`git diff`), without the files the deny list hides.
      *
      * @return array{git: bool, files: list<array{path: string, status: string, added: int|null, removed: int|null}>}
@@ -578,6 +635,30 @@ class LocalWorkspace
         usort($files, fn (array $a, array $b): int => strcmp($a['path'], $b['path']));
 
         return ['git' => true, 'files' => $files];
+    }
+
+    /**
+     * Runs one shell command in the root's folder for the Terminal panel (same loopback/non-production guards as every local call; the caller needs `ai.local-write`).
+     *
+     * @return array{output: string, exit_code: int|null, timed_out: bool}
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function run(string $rootId, string $command): array
+    {
+        try {
+            $result = Process::path($this->rootPath($rootId))->timeout(self::COMMAND_TIMEOUT)->run($command);
+        } catch (ProcessTimedOutException) {
+            return ['output' => '', 'exit_code' => null, 'timed_out' => true];
+        }
+
+        $output = trim($result->output()."\n".$result->errorOutput());
+
+        if (! mb_check_encoding($output, 'UTF-8')) {
+            $output = mb_convert_encoding($output, 'UTF-8', 'UTF-8');
+        }
+
+        return ['output' => mb_strimwidth($output, 0, self::MAX_COMMAND_OUTPUT, '…'), 'exit_code' => $result->exitCode(), 'timed_out' => false];
     }
 
     /** * The file as it is in `HEAD` (null for a file that is not in it), under the same guards as `read`. */

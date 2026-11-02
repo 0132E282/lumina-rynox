@@ -1,5 +1,5 @@
 import { isAxiosError } from 'axios';
-import { Check, Upload } from 'lucide-react';
+import { Check, Mic, Trash2, Upload, Volume2 } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useWatch } from 'react-hook-form';
@@ -12,6 +12,14 @@ import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
 import { avatarUploadError, prepareAvatarFile } from '@/lib/avatar-image';
 import { ASSISTANT_COLORS, ASSISTANT_ICONS } from '@/lib/assistant-avatar';
+import {
+    canSpeak,
+    cloneVoice,
+    cloudPrefix,
+    previewVoice,
+    removeVoice,
+    useSpeech,
+} from '@/lib/speak';
 import { cn } from '@/lib/utils';
 import type { AiChatSettings } from '@/types';
 
@@ -92,6 +100,293 @@ function Choices({
 }
 
 /** * Tab "Cài đặt nhân vật": own instructions, names and the assistant's avatar (upload, icon or vendor logo). The text fields are saved with the dialog's "Lưu"; the image uploads at once. */
+function VoiceButton({
+    label,
+    selected,
+    playing,
+    onPick,
+    onRemove,
+}: {
+    label: string;
+    selected: boolean;
+    playing: boolean;
+    onPick: () => void;
+    onRemove?: () => void;
+}) {
+    return (
+        <span className="inline-flex">
+            <Button
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                variant="outline"
+                size="sm"
+                onClick={onPick}
+                className={cn(
+                    onRemove && 'rounded-r-none',
+                    selected &&
+                        'border-blue-600 bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300',
+                )}
+            >
+                {selected && playing ? (
+                    <Volume2
+                        aria-hidden="true"
+                        className="animate-pulse motion-reduce:animate-none"
+                    />
+                ) : selected ? (
+                    <Check aria-hidden="true" />
+                ) : null}
+                {label}
+            </Button>
+            {onRemove && (
+                <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label={`Xoá giọng ${label}`}
+                    title="Xoá giọng này"
+                    onClick={onRemove}
+                    className="rounded-l-none border-l-0 px-2 text-muted-foreground"
+                >
+                    <Trash2 aria-hidden="true" />
+                </Button>
+            )}
+        </span>
+    );
+}
+
+/** * Makes a voice of the person's own: a name, a recording (uploaded or recorded here) and their confirmation that the voice is theirs to use. */
+function CloneVoice() {
+    const [name, setName] = useState('');
+    const [sample, setSample] = useState<Blob | null>(null);
+    const [consent, setConsent] = useState(false);
+    const [recording, setRecording] = useState<MediaRecorder | null>(null);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const record = async () => {
+        if (recording !== null) {
+            recording.stop();
+
+            return;
+        }
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            });
+            const recorder = new MediaRecorder(stream);
+            const parts: Blob[] = [];
+
+            recorder.ondataavailable = (event) => parts.push(event.data);
+            recorder.onstop = () => {
+                stream.getTracks().forEach((track) => track.stop());
+                setSample(new Blob(parts, { type: recorder.mimeType }));
+                setRecording(null);
+            };
+            recorder.start();
+            setRecording(recorder);
+        } catch {
+            setError('Không dùng được micro.');
+        }
+    };
+
+    const create = async () => {
+        if (sample === null) {
+            return;
+        }
+
+        setBusy(true);
+        setError(null);
+
+        try {
+            await cloneVoice(name.trim(), sample, consent);
+            setName('');
+            setSample(null);
+            setConsent(false);
+            toast.success('Đã tạo giọng của bạn.');
+        } catch (caught) {
+            setError(
+                isAxiosError(caught) && caught.response?.data?.message
+                    ? String(caught.response.data.message)
+                    : 'Không tạo được giọng.',
+            );
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <div className="flex flex-col gap-2 rounded-lg border p-3">
+            <Label>Tạo giọng của tôi</Label>
+            <p className="text-sm text-muted-foreground">
+                Thu hoặc tải lên khoảng 1 đến 3 phút giọng nói rõ, ít tiếng ồn.
+                Bản thu được gửi tới dịch vụ giọng đọc để tạo giọng.
+            </p>
+            <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                maxLength={60}
+                placeholder="Tên giọng"
+                aria-label="Tên giọng"
+                className="h-9 rounded-md border bg-transparent px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+                <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void record()}
+                >
+                    <Mic aria-hidden="true" />
+                    {recording !== null ? 'Dừng thu' : 'Thu giọng'}
+                </Button>
+                <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-3 text-sm hover:bg-accent">
+                    <Upload aria-hidden="true" className="size-4" />
+                    Tải tệp âm thanh
+                    <input
+                        type="file"
+                        accept="audio/*"
+                        className="sr-only"
+                        onChange={(event) =>
+                            setSample(event.target.files?.[0] ?? null)
+                        }
+                    />
+                </label>
+                {sample !== null && (
+                    <span className="text-sm text-muted-foreground">
+                        Đã có bản thu (
+                        {Math.max(1, Math.round(sample.size / 1024))} KB)
+                    </span>
+                )}
+            </div>
+            <label className="flex items-start gap-2 text-sm">
+                <input
+                    type="checkbox"
+                    checked={consent}
+                    onChange={(event) => setConsent(event.target.checked)}
+                    className="mt-1"
+                />
+                Đây là giọng của chính tôi, hoặc tôi được chủ giọng cho phép
+                dùng.
+            </label>
+            {error !== null && (
+                <p role="alert" className="text-sm text-destructive">
+                    {error}
+                </p>
+            )}
+            <Button
+                type="button"
+                size="sm"
+                className="self-start"
+                disabled={
+                    busy || sample === null || !consent || name.trim() === ''
+                }
+                onClick={() => void create()}
+            >
+                {busy ? 'Đang tạo…' : 'Tạo giọng'}
+            </Button>
+        </div>
+    );
+}
+
+/** * Voice that reads the character's answers aloud: the service's sample voices, the person's own, and the device's. A click picks one and plays a short sample. Kept in this browser. */
+function VoicePicker() {
+    const { voice, voices, cloud, speaking } = useSpeech();
+
+    if (!canSpeak() && cloud.length === 0) {
+        return null;
+    }
+
+    const playing = speaking === 'voice-sample';
+    const current = voice ?? voices[0] ?? null;
+    const samples = cloud.filter((item) => !item.own);
+    const own = cloud.filter((item) => item.own);
+
+    return (
+        <div className="flex flex-col gap-3">
+            <Label>Giọng đọc</Label>
+            <div
+                role="radiogroup"
+                aria-label="Giọng đọc của nhân vật"
+                className="flex flex-col gap-3"
+            >
+                {[
+                    { title: 'Giọng mẫu', items: samples },
+                    { title: 'Giọng của tôi', items: own },
+                ].map(
+                    (group) =>
+                        group.items.length > 0 && (
+                            <div
+                                key={group.title}
+                                className="flex flex-col gap-1.5"
+                            >
+                                <span className="text-xs font-medium text-muted-foreground">
+                                    {group.title}
+                                </span>
+                                <div className="flex flex-wrap gap-2">
+                                    {group.items.map((item) => (
+                                        <VoiceButton
+                                            key={item.id}
+                                            label={item.name}
+                                            selected={
+                                                current ===
+                                                cloudPrefix + item.id
+                                            }
+                                            playing={playing}
+                                            onPick={() =>
+                                                previewVoice(
+                                                    cloudPrefix + item.id,
+                                                )
+                                            }
+                                            onRemove={
+                                                item.own
+                                                    ? () =>
+                                                          void removeVoice(
+                                                              item.id,
+                                                          )
+                                                    : undefined
+                                            }
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                        ),
+                )}
+                {voices.length > 0 && (
+                    <div className="flex flex-col gap-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">
+                            Giọng trên máy
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                            {voices.map((name) => (
+                                <VoiceButton
+                                    key={name}
+                                    label={name}
+                                    selected={current === name}
+                                    playing={playing}
+                                    onPick={() => previewVoice(name)}
+                                />
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+            <p className="text-sm text-muted-foreground">
+                Bấm một giọng để nghe thử. Giọng được nhớ trong trình duyệt này.
+            </p>
+            {cloud.length > 0 ? (
+                <CloneVoice />
+            ) : (
+                <p className="text-sm text-muted-foreground">
+                    Muốn có giọng mẫu và tạo giọng của riêng bạn: thêm{' '}
+                    <code>ELEVENLABS_API_KEY</code> vào <code>.env</code>.
+                </p>
+            )}
+        </div>
+    );
+}
+
 export function ChatSettingsPersona({
     draft,
     onChange,
@@ -319,6 +614,8 @@ export function ChatSettingsPersona({
                     placeholder="Trợ lý AI"
                 />
             </div>
+
+            <VoicePicker />
 
             <div className="flex flex-col gap-1">
                 <Field

@@ -154,7 +154,7 @@ export const RecentsList = memo(function RecentsList({
         >
             <div className="flex items-center justify-between pl-2">
                 <span className="truncate text-base font-semibold">
-                    Trợ lý AI
+                    {assistant.name || 'Trợ lý AI'}
                 </span>
                 <div className="flex items-center">
                     <Button
@@ -403,7 +403,7 @@ export const RecentsList = memo(function RecentsList({
                                                             conversation.id,
                                                         ) ? (
                                                             <span className="flex items-center gap-1">
-                                                                <span className="truncate">
+                                                                <span className="min-w-0 flex-1 truncate">
                                                                     {
                                                                         conversation.title
                                                                     }
