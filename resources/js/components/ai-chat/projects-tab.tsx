@@ -1,6 +1,6 @@
 import { Link, router } from '@inertiajs/react';
 import { Folder, FolderOpen, Lock, Plus, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { SourceIcon } from '@/components/ai-chat/source-icon';
 import { repos as reposRoute } from '@/actions/App/Http/Controllers/AiChatController';
 import {
@@ -32,6 +32,7 @@ import { home } from '@/routes';
 import type { AiChatConversation, AiChatRepo } from '@/types';
 
 const REPOS_TTL_MS = 5 * 60 * 1000;
+const HIDDEN_KEY = 'ai-chat.hidden-repos';
 
 /** * "Code" tab: the projects the person can open (GitHub repos the token can read, plus the allowed local folders); picking one selects it for the chat and opens its code. */
 export function ProjectsTab({
@@ -74,6 +75,55 @@ export function ProjectsTab({
     // * The project whose chats are about to be deleted (the project itself stays in the list).
     const [pendingDelete, setPendingDelete] = useState<string | null>(null);
     const [deleting, setDeleting] = useState(false);
+    // * GitHub repos the person removed from the list (kept in this browser only; nothing is stored on the server or touched on GitHub).
+    const [hidden, setHidden] = useState<string[]>(() => {
+        try {
+            return JSON.parse(localStorage.getItem(HIDDEN_KEY) ?? '[]');
+        } catch {
+            return [];
+        }
+    });
+    const hide = (name: string) => {
+        const next = [...new Set([...hidden, name])];
+
+        setHidden(next);
+
+        try {
+            localStorage.setItem(HIDDEN_KEY, JSON.stringify(next));
+        } catch {
+            // * Storage blocked: the repo stays hidden until the page reloads.
+        }
+    };
+    const lastRepo = useRef(repo);
+
+    // * A hidden project comes back when it is needed: picked again (the repo changes to it) or a chat about it exists.
+    useEffect(() => {
+        const picked = repo !== lastRepo.current ? repo : null;
+
+        lastRepo.current = repo;
+
+        const needed = hidden.filter(
+            (name) =>
+                name === picked ||
+                conversations.some(
+                    (conversation) => conversation.repo === name,
+                ),
+        );
+
+        if (needed.length === 0) {
+            return;
+        }
+
+        const next = hidden.filter((name) => !needed.includes(name));
+
+        setHidden(next);
+
+        try {
+            localStorage.setItem(HIDDEN_KEY, JSON.stringify(next));
+        } catch {
+            // * Storage blocked: it shows again until the page reloads.
+        }
+    }, [repo, conversations, hidden]);
     const canCreate = local?.enabled === true && local.can_write;
     const localRows: AiChatRepo[] =
         local?.enabled && local.can_read
@@ -138,16 +188,36 @@ export function ProjectsTab({
         }
     };
 
-    const confirmDelete = () => {
-        if (pendingDelete === null) {
+    const confirmDelete = (target: string | null = pendingDelete) => {
+        if (target === null) {
+            return;
+        }
+
+        const name = target;
+        const isGithub = !name.startsWith('local:');
+        const count = conversations.filter(
+            (conversation) => conversation.repo === name,
+        ).length;
+
+        // * A GitHub repo with no chat has nothing to delete on the server: it is only hidden.
+        if (count === 0) {
+            hide(name);
+            setPendingDelete(null);
+
             return;
         }
 
         setDeleting(true);
         router.delete('/ai-chat/conversations', {
-            data: { scope: 'repo', repo: pendingDelete },
+            data: { scope: 'repo', repo: name },
             preserveScroll: true,
-            onSuccess: () => setPendingDelete(null),
+            onSuccess: () => {
+                if (isGithub) {
+                    hide(name);
+                }
+
+                setPendingDelete(null);
+            },
             onFinish: () => setDeleting(false),
         });
     };
@@ -173,7 +243,9 @@ export function ProjectsTab({
 
     const query = search.trim().toLowerCase();
     const shown = [...(connected ? (repos ?? []) : []), ...localRows].filter(
-        (row) => row.full_name.toLowerCase().includes(query),
+        (row) =>
+            row.full_name.toLowerCase().includes(query) &&
+            !hidden.includes(row.full_name),
     );
 
     return (
@@ -315,108 +387,89 @@ export function ProjectsTab({
                                             </span>
                                         )}
                                     </button>
-                                    {chats.length > 0 && (
+                                    {(chats.length > 0 ||
+                                        !row.full_name.startsWith(
+                                            'local:',
+                                        )) && (
                                         <Button
                                             type="button"
                                             variant="ghost"
                                             size="icon"
-                                            aria-label={`Xoá các cuộc trò chuyện của ${row.full_name}`}
-                                            title="Xoá các cuộc trò chuyện của dự án"
+                                            aria-label={`Xoá dự án ${row.full_name}`}
+                                            title="Xoá dự án"
                                             onClick={() =>
-                                                setPendingDelete(row.full_name)
+                                                // * A GitHub project goes at once (hidden, its chats deleted); a local folder still asks.
+                                                row.full_name.startsWith(
+                                                    'local:',
+                                                )
+                                                    ? setPendingDelete(
+                                                          row.full_name,
+                                                      )
+                                                    : confirmDelete(
+                                                          row.full_name,
+                                                      )
                                             }
                                             className="absolute top-1 right-1 size-7 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:bg-transparent hover:text-destructive"
                                         >
                                             <Trash2 aria-hidden="true" />
                                         </Button>
                                     )}
-                                    {isOpen && (
+                                    {isOpen && chats.length > 0 && (
                                         <ul className="mt-0.5 mb-1 ml-4 flex flex-col gap-0.5 pl-3">
-                                            <li>
-                                                {/* * Same action as picking the project (a fresh chat for it); the name is plain text. */}
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        onSelect(row.full_name)
-                                                    }
-                                                    aria-label={`Cuộc trò chuyện mới trong ${row.full_name}`}
-                                                    className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
-                                                >
-                                                    <Plus
-                                                        aria-hidden="true"
-                                                        className="size-3.5 shrink-0"
-                                                    />
-                                                    Cuộc trò chuyện mới
-                                                </button>
-                                            </li>
-                                            {chats.length === 0 ? (
-                                                <li className="px-2 py-1 text-sm text-foreground/70">
-                                                    Chưa có đoạn chat nào.
-                                                </li>
-                                            ) : (
-                                                chats.map((conversation) =>
-                                                    conversation.id ===
-                                                    PENDING_CHAT_ID ? (
-                                                        <li
-                                                            key={
-                                                                conversation.id
+                                            {chats.map((conversation) =>
+                                                conversation.id ===
+                                                PENDING_CHAT_ID ? (
+                                                    <li
+                                                        key={conversation.id}
+                                                        aria-busy="true"
+                                                        className="block truncate rounded-lg bg-accent px-2 py-1.5 text-sm text-accent-foreground"
+                                                    >
+                                                        {conversation.title}
+                                                    </li>
+                                                ) : (
+                                                    <li
+                                                        key={conversation.id}
+                                                        className="group relative"
+                                                    >
+                                                        <Link
+                                                            href={home.url({
+                                                                query: {
+                                                                    c: conversation.id,
+                                                                },
+                                                            })}
+                                                            {...OPEN_CONVERSATION_VISIT}
+                                                            onClick={onNavigate}
+                                                            aria-current={
+                                                                conversation.id ===
+                                                                activeId
+                                                                    ? 'page'
+                                                                    : undefined
                                                             }
-                                                            aria-busy="true"
-                                                            className="block truncate rounded-lg bg-accent px-2 py-1.5 text-sm text-accent-foreground"
+                                                            className={cn(
+                                                                'text-foreground/80transition-colors block truncate rounded-lg px-2 py-1.5 pr-9 text-sm duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
+                                                                conversation.id ===
+                                                                    activeId &&
+                                                                    'bg-accent text-accent-foreground',
+                                                            )}
                                                         >
                                                             {conversation.title}
-                                                        </li>
-                                                    ) : (
-                                                        <li
-                                                            key={
-                                                                conversation.id
+                                                        </Link>
+                                                        <Button
+                                                            type="button"
+                                                            variant="ghost"
+                                                            size="icon"
+                                                            aria-label={`Xoá cuộc trò chuyện ${conversation.title}`}
+                                                            onClick={() =>
+                                                                setPendingChat(
+                                                                    conversation,
+                                                                )
                                                             }
-                                                            className="group relative"
+                                                            className="absolute top-1/2 right-1 size-7 -translate-y-1/2 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-destructive"
                                                         >
-                                                            <Link
-                                                                href={home.url({
-                                                                    query: {
-                                                                        c: conversation.id,
-                                                                    },
-                                                                })}
-                                                                {...OPEN_CONVERSATION_VISIT}
-                                                                onClick={
-                                                                    onNavigate
-                                                                }
-                                                                aria-current={
-                                                                    conversation.id ===
-                                                                    activeId
-                                                                        ? 'page'
-                                                                        : undefined
-                                                                }
-                                                                className={cn(
-                                                                    'text-foreground/80transition-colors block truncate rounded-lg px-2 py-1.5 pr-9 text-sm duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
-                                                                    conversation.id ===
-                                                                        activeId &&
-                                                                        'bg-accent text-accent-foreground',
-                                                                )}
-                                                            >
-                                                                {
-                                                                    conversation.title
-                                                                }
-                                                            </Link>
-                                                            <Button
-                                                                type="button"
-                                                                variant="ghost"
-                                                                size="icon"
-                                                                aria-label={`Xoá cuộc trò chuyện ${conversation.title}`}
-                                                                onClick={() =>
-                                                                    setPendingChat(
-                                                                        conversation,
-                                                                    )
-                                                                }
-                                                                className="absolute top-1/2 right-1 size-7 -translate-y-1/2 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:text-destructive"
-                                                            >
-                                                                <Trash2 aria-hidden="true" />
-                                                            </Button>
-                                                        </li>
-                                                    ),
-                                                )
+                                                            <Trash2 aria-hidden="true" />
+                                                        </Button>
+                                                    </li>
+                                                ),
                                             )}
                                         </ul>
                                     )}
@@ -465,12 +518,15 @@ export function ProjectsTab({
             >
                 <DialogContent className="sm:max-w-md">
                     <DialogHeader>
-                        <DialogTitle>Xoá các cuộc trò chuyện?</DialogTitle>
+                        <DialogTitle>
+                            {pendingDelete?.startsWith('local:')
+                                ? 'Xoá các cuộc trò chuyện?'
+                                : 'Xoá dự án?'}
+                        </DialogTitle>
                         <DialogDescription>
-                            {pendingCount} cuộc trò chuyện của dự án{' '}
-                            {pendingDelete?.replace(/^local:/, '')} sẽ bị xoá
-                            vĩnh viễn cùng tin nhắn và đề xuất sửa tệp. Dự án và
-                            mã nguồn không bị đụng tới. Không hoàn tác được.
+                            {pendingDelete?.startsWith('local:')
+                                ? `${pendingCount} cuộc trò chuyện của dự án ${pendingDelete.replace(/^local:/, '')} sẽ bị xoá vĩnh viễn cùng tin nhắn và đề xuất sửa tệp. Dự án và mã nguồn không bị đụng tới. Không hoàn tác được.`
+                                : `Dự án ${pendingDelete ?? ''} sẽ bị ẩn khỏi danh sách${pendingCount > 0 ? ` và ${pendingCount} cuộc trò chuyện của nó bị xoá vĩnh viễn cùng tin nhắn và đề xuất sửa tệp` : ''}. Repo trên GitHub không bị đụng tới.`}
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter>
@@ -485,7 +541,7 @@ export function ProjectsTab({
                         <Button
                             type="button"
                             variant="destructive"
-                            onClick={confirmDelete}
+                            onClick={() => confirmDelete()}
                             disabled={deleting}
                         >
                             Xoá
