@@ -35,7 +35,7 @@ import { ResizeHandle } from '@/components/ai-chat/resize-handle';
 import { SessionPanel } from '@/components/ai-chat/session-panel';
 import { speakIfAuto, stopSpeaking } from '@/lib/speak';
 import { markTyping } from '@/lib/typing';
-import { referenceBlock } from '@/lib/code-reference';
+import { expandReferences, referenceBlock } from '@/lib/code-reference';
 import type { CodeReference } from '@/lib/code-reference';
 import { SourceIcon } from '@/components/ai-chat/source-icon';
 import {
@@ -199,6 +199,7 @@ function ChatPanel({
     onExtraReposChange: setExtraRepos,
     onLog,
     onChanges,
+    proposalSync,
     onOpenFile,
     onSession,
     selection,
@@ -207,7 +208,10 @@ function ChatPanel({
     onModeChange,
     settings,
     askRequest,
+    activeFile,
+    markedFiles,
     onPending,
+    onConversationId,
 }: {
     conversation: AiChatConversation | null;
     initialMessages: AiChatMessage[];
@@ -228,6 +232,8 @@ function ChatPanel({
     onLog: (level: ActivityEntry['level'], text: string) => void;
     /** * The files the AI proposed to change in this conversation, for the code viewer. */
     onChanges: (proposals: AiChatProposal[]) => void;
+    /** * Proposals the code viewer decided (applied, dropped, undone): the cards in this thread show the same state. */
+    proposalSync: { id: number; updated: AiChatProposal[] } | null;
     /** * Opens a file of an edit proposal in the code viewer. */
     onOpenFile: (repo: string, path: string) => void;
     /** * The live thread and the picked AI account, for the read-only session panel. */
@@ -241,8 +247,14 @@ function ChatPanel({
     settings: AiChatSettings;
     /** * Lines picked in the code viewer: added to the draft once per request. */
     askRequest: { id: number; reference: CodeReference } | null;
+    /** * The file open in the code viewer: tagged by itself, replaced when another file opens. */
+    activeFile: string | null;
+    /** * Files picked together in the viewer (Cmd/Ctrl+click): all tagged, instead of the open file alone. */
+    markedFiles: string[];
     /** * A first message of a project chat is on its way: the sidebar lists the chat under its project at once. */
     onPending: (chat: AiChatConversation | null) => void;
+    /** * The id of the chat on screen (null until its first message is saved): the code viewer's comment box opens its sessions under it. */
+    onConversationId: (id: string | null) => void;
 }) {
     const authUser = usePage<{ auth: Auth }>().props.auth.user;
     const [items, setItems] = useState<ThreadItem[]>(initialMessages);
@@ -256,6 +268,27 @@ function ChatPanel({
     const [subagents, setSubagents] = useState<AiSubagent[]>([]);
     // * A request that was there before this chat mounted is already handled.
     const handledAsk = useRef<number | null>(askRequest?.id ?? null);
+
+    // * The file being viewed is tagged by itself (or all the files picked with Cmd/Ctrl+click); opening another swaps the tags, and a tag the person removed stays gone until then.
+    useEffect(() => {
+        const paths =
+            markedFiles.length > 0
+                ? markedFiles
+                : activeFile === null
+                  ? []
+                  : [activeFile];
+
+        setReferences((current) => [
+            ...current.filter((reference) => reference.auto !== true),
+            ...paths.map((path) => ({
+                path,
+                startLine: 0,
+                endLine: 0,
+                text: path,
+                auto: true,
+            })),
+        ]);
+    }, [activeFile, markedFiles]);
 
     useEffect(() => {
         if (askRequest !== null && handledAsk.current !== askRequest.id) {
@@ -296,11 +329,43 @@ function ChatPanel({
         onChanges(items.flatMap((item) => item.proposals ?? []));
     }, [items, onChanges]);
 
+    // * A decision made in the code viewer reaches the cards of the thread (no stale "Hoàn tác" button).
+    useEffect(() => {
+        if (proposalSync === null) {
+            return;
+        }
+
+        setItems((current) =>
+            current.map((item) =>
+                item.proposals?.some((proposal) =>
+                    proposalSync.updated.some(
+                        (update) => update.id === proposal.id,
+                    ),
+                )
+                    ? {
+                          ...item,
+                          proposals: item.proposals.map(
+                              (proposal) =>
+                                  proposalSync.updated.find(
+                                      (update) => update.id === proposal.id,
+                                  ) ?? proposal,
+                          ),
+                      }
+                    : item,
+            ),
+        );
+    }, [proposalSync]);
+
     useEffect(() => {
         onSession({ items });
     }, [items, onSession]);
 
     const conversationId = useRef<string | null>(conversation?.id ?? null);
+
+    useEffect(
+        () => onConversationId(conversationId.current),
+        [onConversationId],
+    );
     const nextLocalId = useRef(0);
 
     /** `chosen`: text of a picked ```choices option, sent as-is; the draft and attachments stay untouched. */
@@ -310,14 +375,15 @@ function ChatPanel({
     const assistant = assistantIdentity(settings, answering);
 
     const submit = async (chosen?: string, queuedFiles: File[] = []) => {
-        const text = (
-            chosen ??
-            [draft.trim(), ...references.map(referenceBlock)]
-                .filter((part) => part !== '')
-                .join('\n\n')
-        ).trim();
+        const text = (chosen ?? expandReferences(draft, references)).trim();
 
-        if (text === '') {
+        // * The tag of the open file alone is not a message: something has to be typed or picked as well.
+        if (
+            text === '' ||
+            (chosen === undefined &&
+                draft.trim() === '' &&
+                references.every((reference) => reference.auto === true))
+        ) {
             return;
         }
 
@@ -334,7 +400,9 @@ function ChatPanel({
 
             if (chosen === undefined) {
                 setDraft('');
-                setReferences([]);
+                setReferences((current) =>
+                    current.filter((reference) => reference.auto === true),
+                );
                 setPreviousDraft(null);
                 setFiles([]);
             }
@@ -348,7 +416,9 @@ function ChatPanel({
 
         if (chosen === undefined) {
             setDraft('');
-            setReferences([]);
+            setReferences((current) =>
+                current.filter((reference) => reference.auto === true),
+            );
             setPreviousDraft(null);
             setFiles([]);
         }
@@ -546,6 +616,7 @@ function ChatPanel({
                 data.assistant_message.content,
             );
             conversationId.current = data.conversation.id;
+            onConversationId(data.conversation.id);
             setItems((current) => [
                 ...current.filter((item) => item.id !== localId),
                 data.user_message,
@@ -610,6 +681,7 @@ function ChatPanel({
 
             if (kept && mounted.current) {
                 conversationId.current = kept;
+                onConversationId(kept);
                 router.reload({ only: ['conversations'] });
             }
 
@@ -789,6 +861,27 @@ function ChatPanel({
                     liveSteps={liveSteps}
                     assistant={assistant}
                     onChoose={(text) => void submit(text)}
+                    onRetry={() => {
+                        // * Asks the last question again: the failed question and its error line go, submit puts the question back.
+                        const question = [...items]
+                            .reverse()
+                            .find((item) => item.role === 'user');
+
+                        if (question === undefined) {
+                            return;
+                        }
+
+                        setItems((current) => {
+                            const lastUser = current.findLastIndex(
+                                (item) => item.role === 'user',
+                            );
+
+                            return lastUser === -1
+                                ? current
+                                : current.slice(0, lastUser);
+                        });
+                        void submit(question.content);
+                    }}
                     onOpenFile={onOpenFile}
                     onProposalsChange={(id, proposals) =>
                         setItems((current) =>
@@ -1053,6 +1146,14 @@ export default function AiChatIndex({
         id: number;
     } | null>(null);
     const [changes, setChanges] = useState<AiChatProposal[]>([]);
+    const [proposalSync, setProposalSync] = useState<{
+        id: number;
+        updated: AiChatProposal[];
+    } | null>(null);
+    const [activeFile, setActiveFile] = useState<string | null>(null);
+    // * The chat on screen, for the sessions the code viewer's comment box opens under it.
+    const [liveChatId, setLiveChatId] = useState<string | null>(null);
+    const [markedFiles, setMarkedFiles] = useState<string[]>([]);
     const [terminalOpen, setTerminalOpen] = useState(false);
     const terminalWidth = useResizableWidth(
         'ai-chat.width.terminal',
@@ -1363,7 +1464,12 @@ export default function AiChatIndex({
                     aria-label="Trò chuyện với trợ lý AI"
                     className={cn(
                         '@container/chat relative flex min-h-0 flex-1 flex-col',
-                        recentsCollapsed ? 'min-w-0' : 'min-w-[22rem]',
+                        // * With the project files open the chat may shrink to nothing when they are dragged wide; what no longer fits is clipped.
+                        codeOpen && repo !== null
+                            ? 'min-w-0 overflow-hidden'
+                            : recentsCollapsed
+                              ? 'min-w-0'
+                              : 'min-w-[22rem]',
                     )}
                 >
                     <div
@@ -1588,6 +1694,7 @@ export default function AiChatIndex({
                         <ChatPanel
                             showProjects={recentsTab === 'projects'}
                             key={activeId ?? 'new'}
+                            onConversationId={setLiveChatId}
                             conversation={activeConversation}
                             initialMessages={messages}
                             aiAccounts={aiAccounts}
@@ -1608,6 +1715,7 @@ export default function AiChatIndex({
                             onAgentEnd={endAgent}
                             onLog={addLog}
                             onChanges={setChanges}
+                            proposalSync={proposalSync}
                             onOpenFile={(file, path) => {
                                 setExtraRepos((current) =>
                                     file === repo || current.includes(file)
@@ -1629,6 +1737,8 @@ export default function AiChatIndex({
                             onModeChange={changeMode}
                             settings={settings}
                             askRequest={askRequest}
+                            activeFile={activeFile}
+                            markedFiles={markedFiles}
                             onPending={setPendingChat}
                         />
                     )}
@@ -1848,6 +1958,125 @@ export default function AiChatIndex({
                                 repo={viewed ?? repo}
                                 repos={[repo, ...extraRepos]}
                                 onViewRepo={setViewedRepo}
+                                onActiveFile={setActiveFile}
+                                onMarkedFiles={setMarkedFiles}
+                                aiSelection={selection}
+                                assistant={sidebarAssistant}
+                                onChangesUpdate={(updated) => {
+                                    setProposalSync({
+                                        id: Date.now(),
+                                        updated,
+                                    });
+                                    setChanges((current) => [
+                                        ...current.filter(
+                                            (item) =>
+                                                !updated.some(
+                                                    (edit) =>
+                                                        edit.id === item.id,
+                                                ),
+                                        ),
+                                        ...updated,
+                                    ]);
+                                }}
+                                onInlineAsk={async (
+                                    reference,
+                                    question,
+                                    conversation,
+                                    signal,
+                                    onStep,
+                                ) => {
+                                    // * Same endpoint, account and project as the chat; the answer goes to the comment box, not the thread.
+                                    const form = new FormData();
+
+                                    form.append(
+                                        'message',
+                                        reference.startLine === 0
+                                            ? `${referenceBlock(reference)}\n\n${question}`
+                                            : `${referenceBlock(reference)}\n\nChỉ xử lý đoạn code đã chọn ở trên (dòng ${reference.startLine}-${reference.endLine} của \`${reference.path}\`); nếu cần sửa thì chỉ sửa đúng đoạn này, không đụng phần còn lại của tệp.\n\n${question}`,
+                                    );
+
+                                    if (conversation !== null) {
+                                        form.append(
+                                            'conversation_id',
+                                            conversation,
+                                        );
+                                    }
+
+                                    // * The first question opens a child session of the chat on screen; later ones continue it.
+                                    if (
+                                        conversation === null &&
+                                        liveChatId !== null
+                                    ) {
+                                        form.append(
+                                            'parent_conversation_id',
+                                            liveChatId,
+                                        );
+                                    }
+
+                                    // * Edits to a local folder are written at once: the file opens with the change in place (no review step); the arrow in its header takes it back.
+                                    if (selection.accountId !== null) {
+                                        form.append(
+                                            'ai_account_id',
+                                            String(selection.accountId),
+                                        );
+                                    }
+
+                                    if (selection.model !== null) {
+                                        form.append(
+                                            'ai_model',
+                                            selection.model,
+                                        );
+                                    }
+
+                                    if (repo.startsWith('local:')) {
+                                        form.append(
+                                            'local_root',
+                                            repo.slice(6),
+                                        );
+                                    } else {
+                                        form.append('repo', repo);
+                                    }
+
+                                    const data =
+                                        await postStream<AiChatSendResponse>(
+                                            '/ai-chat/messages/stream',
+                                            form,
+                                            { signal, onStep },
+                                        );
+
+                                    // * Edits to a folder of this machine are already written: the file is reloaded and shown as a diff in the viewer, and the change is listed with the chat's other changes. The box only says which files changed.
+                                    const edits =
+                                        data.assistant_message.proposals ?? [];
+
+                                    if (edits.length > 0) {
+                                        setChanges((current) => [
+                                            ...current.filter(
+                                                (item) =>
+                                                    !edits.some(
+                                                        (edit) =>
+                                                            edit.id === item.id,
+                                                    ),
+                                            ),
+                                            ...edits,
+                                        ]);
+                                        invalidateAiChatCache(`tree.${repo}`);
+                                        invalidateAiChatCache(`file.${repo}.`);
+                                        setOpenRequest({
+                                            repo,
+                                            path: edits[0].path,
+                                            id: Date.now(),
+                                        });
+                                    }
+
+                                    return {
+                                        answer:
+                                            data.assistant_message.content +
+                                            (edits.length > 0
+                                                ? `\n\n**Đề xuất sửa:** ${edits.map((edit) => `\`${edit.path}\``).join(', ')}. Xem thay đổi ở khung tệp, bấm ✓ trên đầu khung để áp dụng.`
+                                                : ''),
+                                        conversation: data.conversation.id,
+                                    };
+                                }}
                                 branch={viewedBranch}
                                 headerActions={
                                     <>

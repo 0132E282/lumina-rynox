@@ -1,10 +1,15 @@
-import { ArrowUpRight, ChevronDown, ChevronRight } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, ChevronRight, Undo2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { FileContextMenu } from '@/components/ai-chat/file-context-menu';
+import type { FileActions } from '@/components/ai-chat/file-context-menu';
 import { FileIcon } from '@/components/ai-chat/file-icon';
 import { LoadingRows } from '@/components/ai-chat/loading-rows';
 import { UnifiedDiff } from '@/components/ai-chat/unified-diff';
+import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import { requestErrorMessage } from '@/lib/ai-error';
+import { useConfirm } from '@/hooks/use-confirm';
 import { cn } from '@/lib/utils';
 
 export type Change = {
@@ -24,6 +29,8 @@ export type LocalChangeList = {
     files: Change[] | null;
     git: boolean;
     error: string | null;
+    /** * Reads the list again now (after a change made from here). */
+    refresh: () => void;
 };
 
 /** * The files of a local project that differ from git `HEAD`; follows the working tree while the tab is visible. */
@@ -35,6 +42,7 @@ export function useLocalChanges(root: string | null): LocalChangeList {
         root ? (cache.get(root)?.git ?? true) : true,
     );
     const [error, setError] = useState<string | null>(null);
+    const [reload, setReload] = useState(0);
 
     useEffect(() => {
         if (root === null) {
@@ -80,20 +88,27 @@ export function useLocalChanges(root: string | null): LocalChangeList {
             cancelled = true;
             window.clearInterval(timer);
         };
-    }, [root]);
+    }, [root, reload]);
 
-    return { files, git, error };
+    return {
+        files,
+        git,
+        error,
+        refresh: () => setReload((count) => count + 1),
+    };
 }
 
 /** * Every file of a local project that differs from git `HEAD`, one row each; a row opens its diff in place. */
 export function LocalChanges({
     root,
-    list: { files, git, error },
+    list: { files, git, error, refresh },
     onOpenFile,
+    actions,
 }: {
     root: string;
     list: LocalChangeList;
     onOpenFile: (path: string) => void;
+    actions: FileActions;
 }) {
     const [open, setOpen] = useState<Set<string>>(new Set());
 
@@ -107,6 +122,35 @@ export function LocalChanges({
 
             return next;
         });
+
+    const { confirm, dialog } = useConfirm();
+
+    // * Puts the file back as git `HEAD` has it (a new file is removed); asks first, since the edits are lost.
+    const discard = async (file: Change) => {
+        if (
+            !(await confirm({
+                title: 'Hoàn tác thay đổi',
+                description: `Hoàn tác mọi thay đổi của ${file.path}? Không thể khôi phục lại.`,
+                action: 'Hoàn tác',
+            }))
+        ) {
+            return;
+        }
+
+        try {
+            await api.post('/ai-chat/local/discard', {
+                root,
+                path: file.path,
+            });
+            invalidateAiChatCache(`file.local:${root}.`);
+            toast.success(`Đã hoàn tác ${file.path}.`);
+            refresh();
+        } catch (caught) {
+            toast.error(
+                requestErrorMessage(caught, 'Không hoàn tác được tệp này.'),
+            );
+        }
+    };
 
     if (error !== null) {
         return (
@@ -137,83 +181,131 @@ export function LocalChanges({
     }
 
     return (
-        <ul className="min-h-0 flex-1 animate-in overflow-auto duration-200 fade-in motion-reduce:animate-none">
-            {files.map((file) => {
-                const name = file.path.split('/').pop() ?? file.path;
-                const dir = file.path.split('/').slice(0, -1).join('/');
-                const expanded = open.has(file.path);
+        <>
+            {dialog}
+            <ul className="min-h-0 flex-1 animate-in overflow-auto duration-200 fade-in motion-reduce:animate-none">
+                {files.map((file) => {
+                    const name = file.path.split('/').pop() ?? file.path;
+                    const dir = file.path.split('/').slice(0, -1).join('/');
+                    const expanded = open.has(file.path);
 
-                return (
-                    <li key={file.path} className="border-b last:border-b-0">
-                        <div className="flex items-center gap-1 pr-2 hover:bg-accent/50">
-                            <button
-                                type="button"
-                                aria-expanded={expanded}
-                                onClick={() => toggle(file.path)}
-                                className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    return (
+                        <li
+                            key={file.path}
+                            className="border-b last:border-b-0"
+                        >
+                            <FileContextMenu
+                                path={file.path}
+                                actions={actions}
+                                items={[
+                                    {
+                                        label: expanded
+                                            ? 'Ẩn thay đổi'
+                                            : 'Mở thay đổi',
+                                        onSelect: () => toggle(file.path),
+                                    },
+                                    {
+                                        label: 'Mở tệp',
+                                        disabled: file.status === 'D',
+                                        onSelect: () => onOpenFile(file.path),
+                                    },
+                                    {
+                                        label: 'Hoàn tác thay đổi',
+                                        onSelect: () => void discard(file),
+                                    },
+                                ]}
                             >
-                                {expanded ? (
-                                    <ChevronDown
-                                        aria-hidden="true"
-                                        className="size-4 shrink-0 text-muted-foreground"
-                                    />
-                                ) : (
-                                    <ChevronRight
-                                        aria-hidden="true"
-                                        className="size-4 shrink-0 text-muted-foreground"
-                                    />
-                                )}
-                                <FileIcon name={name} className="size-4" />
-                                <span
-                                    className={cn(
-                                        'truncate',
-                                        file.status === 'A' &&
-                                            'text-green-700 dark:text-green-400',
-                                        file.status === 'D' &&
-                                            'text-red-700 line-through dark:text-red-400',
-                                    )}
-                                >
-                                    {name}
-                                </span>
-                                {dir !== '' && (
-                                    <span className="truncate text-xs text-muted-foreground">
-                                        {dir}
-                                    </span>
-                                )}
-                                <span className="ml-auto flex shrink-0 gap-1.5 text-xs tabular-nums">
-                                    {file.added !== null && file.added > 0 && (
-                                        <span className="text-green-700 dark:text-green-400">
-                                            +{file.added}
+                                <div className="flex items-center gap-1 pr-2 hover:bg-accent/50">
+                                    <button
+                                        type="button"
+                                        aria-expanded={expanded}
+                                        onClick={() => toggle(file.path)}
+                                        className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    >
+                                        {expanded ? (
+                                            <ChevronDown
+                                                aria-hidden="true"
+                                                className="size-4 shrink-0 text-muted-foreground"
+                                            />
+                                        ) : (
+                                            <ChevronRight
+                                                aria-hidden="true"
+                                                className="size-4 shrink-0 text-muted-foreground"
+                                            />
+                                        )}
+                                        <FileIcon
+                                            name={name}
+                                            className="size-4"
+                                        />
+                                        <span
+                                            className={cn(
+                                                'truncate',
+                                                file.status === 'A' &&
+                                                    'text-green-700 dark:text-green-400',
+                                                file.status === 'D' &&
+                                                    'text-red-700 line-through dark:text-red-400',
+                                            )}
+                                        >
+                                            {name}
                                         </span>
-                                    )}
-                                    {file.removed !== null &&
-                                        file.removed > 0 && (
-                                            <span className="text-red-700 dark:text-red-400">
-                                                −{file.removed}
+                                        {dir !== '' && (
+                                            <span className="truncate text-xs text-muted-foreground">
+                                                {dir}
                                             </span>
                                         )}
-                                </span>
-                            </button>
-                            {file.status !== 'D' && (
-                                <button
-                                    type="button"
-                                    aria-label={`Mở ${file.path}`}
-                                    title="Mở tệp"
-                                    onClick={() => onOpenFile(file.path)}
-                                    className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                                >
-                                    <ArrowUpRight
-                                        aria-hidden="true"
-                                        className="size-4"
-                                    />
-                                </button>
+                                        <span className="ml-auto flex shrink-0 gap-1.5 text-xs tabular-nums">
+                                            {file.added !== null &&
+                                                file.added > 0 && (
+                                                    <span className="text-green-700 dark:text-green-400">
+                                                        +{file.added}
+                                                    </span>
+                                                )}
+                                            {file.removed !== null &&
+                                                file.removed > 0 && (
+                                                    <span className="text-red-700 dark:text-red-400">
+                                                        −{file.removed}
+                                                    </span>
+                                                )}
+                                        </span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-label={`Hoàn tác ${file.path}`}
+                                        title="Hoàn tác thay đổi"
+                                        onClick={() => void discard(file)}
+                                        className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    >
+                                        <Undo2
+                                            aria-hidden="true"
+                                            className="size-4"
+                                        />
+                                    </button>
+                                    {file.status !== 'D' && (
+                                        <button
+                                            type="button"
+                                            aria-label={`Mở ${file.path}`}
+                                            title="Mở tệp"
+                                            onClick={() =>
+                                                onOpenFile(file.path)
+                                            }
+                                            className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                        >
+                                            <ArrowUpRight
+                                                aria-hidden="true"
+                                                className="size-4"
+                                            />
+                                        </button>
+                                    )}
+                                </div>
+                            </FileContextMenu>
+                            {expanded && (
+                                <ChangeDiff root={root} change={file} />
                             )}
-                        </div>
-                        {expanded && <ChangeDiff root={root} change={file} />}
-                    </li>
-                );
-            })}
-        </ul>
+                        </li>
+                    );
+                })}
+            </ul>
+        </>
     );
 }
 

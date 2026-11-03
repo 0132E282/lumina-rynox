@@ -62,7 +62,7 @@ abstract class ApiLlmClient implements LlmClient
                 $prompt,
             );
         } catch (ConnectionException) {
-            throw new AiException(AiException::TIMEOUT);
+            throw new AiException(AiException::TIMEOUT, null, 'không kết nối được hoặc chờ quá '.self::TIMEOUT_SECONDS.' giây');
         }
 
         if (in_array($response->status(), [401, 403], true)) {
@@ -75,7 +75,7 @@ abstract class ApiLlmClient implements LlmClient
         }
 
         if (! $response->successful()) {
-            throw new AiException(AiException::FAILED);
+            throw new AiException(AiException::FAILED, null, 'mã HTTP '.$response->status());
         }
 
         $text = $this->extract($response);

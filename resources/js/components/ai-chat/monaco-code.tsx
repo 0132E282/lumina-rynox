@@ -1,8 +1,14 @@
-import { rememberCopied } from '@/lib/code-reference';
+import { rememberCopied, referenceLabel } from '@/lib/code-reference';
+import { createRoot } from 'react-dom/client';
+import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
+import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
+import { InlineAsk } from '@/components/ai-chat/inline-ask';
+import type { InlineAnswer } from '@/components/ai-chat/inline-ask';
 import { Editor } from '@monaco-editor/react';
 import type { Monaco } from '@monaco-editor/react';
-import type { editor } from 'monaco-editor';
+import type { editor, Range } from 'monaco-editor';
 import { useEffect, useRef, useState } from 'react';
+import type { AiChatActivityStep } from '@/types';
 import { lineChanges } from '@/lib/line-changes';
 import type { Hunk } from '@/lib/line-changes';
 import {
@@ -18,10 +24,17 @@ export default function MonacoCode({
     onChange,
     onSave,
     onAsk,
+    onInlineAsk,
+    assistant,
+    askTrigger,
     baseline,
+    boxHost,
+    revealLine,
 }: {
     path: string;
     value: string;
+    /** * Scrolls the editor to this line once (the id makes the same line scroll again): where the AI changed the file. */
+    revealLine?: { line: number; id: number } | null;
     onChange?: (value: string) => void;
     onSave?: () => void;
     /** * Adds "Chat với AI" to the right-click menu: called with the selected lines. */
@@ -32,6 +45,20 @@ export default function MonacoCode({
         endLine: number;
         text: string;
     }) => void;
+    /** * Name and avatar shown on the answers of the comment box. */
+    assistant?: AssistantIdentity;
+    /** * Element the comment boxes float in (over the editor and over a diff shown in its place); without it they are overlay widgets of the editor. */
+    boxHost?: { current: HTMLElement | null };
+    /** * Filled with a function that asks about the selection (the whole file when nothing is selected): the viewer's header button calls it. */
+    askTrigger?: { current: (() => void) | null };
+    /** * When set, "Chat với AI về đoạn này" opens a comment box under the lines and answers there, instead of calling onAsk. */
+    onInlineAsk?: (
+        selection: { startLine: number; endLine: number; text: string },
+        question: string,
+        conversation: string | null,
+        signal: AbortSignal,
+        onStep: (step: AiChatActivityStep) => void,
+    ) => Promise<InlineAnswer>;
 }) {
     const editable = onChange !== undefined;
     // * The editor outlives renders: its save command always calls the newest handler.
@@ -44,9 +71,43 @@ export default function MonacoCode({
     const askRef = useRef(onAsk);
 
     askRef.current = onAsk;
+    const inlineRef = useRef(onInlineAsk);
+
+    inlineRef.current = onInlineAsk;
+    // * The comment boxes open right now (several at once, each on its own lines).
+    const openBoxes = useRef(new Set<() => void>());
+    // * Shows or hides the avatar by the selection (set once the editor is mounted).
+    const syncHintRef = useRef<() => void>(() => {});
+    const assistantRef = useRef(assistant);
+
+    assistantRef.current = assistant;
     const monacoRef = useRef<Monaco | null>(null);
     const [instance, setInstance] =
         useState<editor.IStandaloneCodeEditor | null>(null);
+
+    useEffect(() => {
+        if (
+            instance === null ||
+            revealLine === undefined ||
+            revealLine === null
+        ) {
+            return;
+        }
+
+        // * A tick later, so the file text that just arrived is in the editor.
+        const timer = window.setTimeout(() => {
+            const line = Math.min(
+                Math.max(1, revealLine.line),
+                instance.getModel()?.getLineCount() ?? 1,
+            );
+
+            instance.revealLineInCenter(line);
+            instance.setPosition({ lineNumber: line, column: 1 });
+        }, 60);
+
+        return () => window.clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [instance, revealLine?.id, value.length > 0]);
 
     useEffect(() => {
         if (instance === null || baseline === undefined || baseline === null) {
@@ -215,6 +276,173 @@ export default function MonacoCode({
         };
     }, [instance, baseline]);
 
+    // * The comment box: a layer floating over the editor (position: absolute, above the lines), just under the picked lines. It pushes nothing: no room is made for it, so the lines and their numbers stay where they are.
+    const openInlineAsk = (
+        instance: editor.ICodeEditor,
+        range: Range | null,
+        anchorLine: number,
+        selection: { startLine: number; endLine: number; text: string },
+        ask: NonNullable<typeof onInlineAsk>,
+    ) => {
+        const node = document.createElement('div');
+        const root = createRoot(node);
+        const marked = instance.createDecorationsCollection(
+            range === null
+                ? []
+                : [{ range, options: { inlineClassName: 'pm-asked-range' } }],
+        );
+        // * The asked lines keep their own mark: the selection (and its avatar) steps aside so it does not peek out from behind the box.
+        if (range !== null) {
+            instance.setPosition(range.getEndPosition());
+        }
+
+        const widgetId = `pm.inline-ask.${Date.now()}`;
+        // * Under the last picked line, kept inside the editor (it slides up when the answer grows past the bottom).
+        const place = () => {
+            const {
+                contentLeft,
+                contentWidth,
+                verticalScrollbarWidth,
+                height,
+            } = instance.getLayoutInfo();
+            const top =
+                instance.getBottomForLineNumber(anchorLine) -
+                instance.getScrollTop() +
+                4;
+
+            node.style.left = `${contentLeft}px`;
+            node.style.width = `${contentWidth - verticalScrollbarWidth}px`;
+            node.style.maxHeight = `${Math.floor(height * 0.92)}px`;
+            node.style.top = `${Math.max(4, Math.min(top, height - node.offsetHeight - 4))}px`;
+        };
+
+        node.style.position = 'absolute';
+        node.style.zIndex = '50';
+        node.style.overflowY = 'auto';
+        // * The wheel scrolls the box (when its answer is long), not the editor behind it.
+        node.addEventListener('wheel', (event) => event.stopPropagation(), {
+            passive: true,
+        });
+
+        const widget: editor.IOverlayWidget = {
+            getId: () => widgetId,
+            getDomNode: () => node,
+            getPosition: () => null,
+        };
+        const layout = instance.onDidLayoutChange(place);
+        const scroll = instance.onDidScrollChange(place);
+
+        const host = boxHost?.current ?? null;
+
+        if (host === null) {
+            instance.addOverlayWidget(widget);
+        } else {
+            host.appendChild(node);
+        }
+
+        place();
+
+        // * A click outside the box closes it (added a tick later, so the click that opened it does not).
+        const outside = (event: PointerEvent) => {
+            if (!node.contains(event.target as Node)) {
+                close();
+            }
+        };
+        const outsideTimer = window.setTimeout(
+            () => document.addEventListener('pointerdown', outside, true),
+            0,
+        );
+
+        const close = () => {
+            window.clearTimeout(outsideTimer);
+            document.removeEventListener('pointerdown', outside, true);
+            openBoxes.current.delete(close);
+            host?.removeEventListener('pm-close-boxes', close);
+            // * First, so the box is gone even when the editor was disposed before it.
+            if (host !== null) {
+                node.remove();
+            }
+
+            // * The editor may be gone already (the file reloaded under the box): its own parts are best effort, the box's React tree always goes.
+            try {
+                syncHintRef.current();
+                layout.dispose();
+                scroll.dispose();
+                marked.clear();
+
+                if (host === null) {
+                    instance.removeOverlayWidget(widget);
+                }
+
+                instance.focus();
+            } catch {
+                // * Disposed with the editor.
+            }
+
+            // * Not inside this call: React may be rendering the box that asked to close.
+            queueMicrotask(() => root.unmount());
+        };
+
+        // * The viewer closes them all at once (an edit decided, another file opened).
+        host?.addEventListener('pm-close-boxes', close);
+        openBoxes.current.add(close);
+        syncHintRef.current();
+        root.render(
+            <InlineAsk
+                label={referenceLabel({
+                    path: pathRef.current,
+                    ...selection,
+                })}
+                assistant={assistantRef.current ?? {}}
+                ask={(question, conversation, signal, onStep) =>
+                    ask(selection, question, conversation, signal, onStep)
+                }
+                onClose={close}
+                onHeight={place}
+            />,
+        );
+    };
+
+    // * Asks about the lines selected in the editor: the comment box when the page gives one, else the chat takes them as a reference.
+    const askSelection = (instance: editor.ICodeEditor) => {
+        const range = instance.getSelection();
+        const model = instance.getModel();
+
+        if (range === null || model === null) {
+            return;
+        }
+
+        const inline = inlineRef.current;
+        // * Nothing selected: the whole file is what is asked about (startLine 0 means a whole file), the box opens under the cursor.
+        const whole = range.isEmpty();
+        const selection = whole
+            ? { startLine: 0, endLine: 0, text: pathRef.current }
+            : {
+                  startLine: range.startLineNumber,
+                  // * A selection that ends at a line's very start does not include that line.
+                  endLine:
+                      range.endColumn === 1 &&
+                      range.endLineNumber > range.startLineNumber
+                          ? range.endLineNumber - 1
+                          : range.endLineNumber,
+                  text: model.getValueInRange(range),
+              };
+
+        if (inline !== undefined) {
+            openInlineAsk(
+                instance,
+                whole ? null : range,
+                whole ? range.startLineNumber : selection.endLine,
+                selection,
+                inline,
+            );
+
+            return;
+        }
+
+        askRef.current?.(selection);
+    };
+
     return (
         <Editor
             path={path}
@@ -228,6 +456,72 @@ export default function MonacoCode({
             onMount={(editor, monaco) => {
                 monacoRef.current = monaco;
                 setInstance(editor);
+                // * The assistant's avatar by a selection: a click asks about the selected lines (like Cmd+L).
+                const hint = document.createElement('div');
+                const hintRoot = createRoot(hint);
+                const hintWidget: editor.IContentWidget = {
+                    getId: () => 'pm.ask-hint',
+                    getDomNode: () => hint,
+                    getPosition: () => {
+                        const range = editor.getSelection();
+
+                        return range === null || range.isEmpty()
+                            ? null
+                            : {
+                                  position: range.getEndPosition(),
+                                  preference: [
+                                      monaco.editor
+                                          .ContentWidgetPositionPreference
+                                          .BELOW,
+                                      monaco.editor
+                                          .ContentWidgetPositionPreference
+                                          .ABOVE,
+                                  ],
+                              };
+                    },
+                };
+                let hintShown = false;
+                const syncHint = () => {
+                    const range = editor.getSelection();
+                    const wanted =
+                        range !== null &&
+                        !range.isEmpty() &&
+                        (inlineRef.current !== undefined ||
+                            askRef.current !== undefined);
+
+                    if (wanted && !hintShown) {
+                        hintRoot.render(
+                            <button
+                                type="button"
+                                title="Hỏi AI về đoạn này (⌘L)"
+                                aria-label="Hỏi AI về đoạn này"
+                                // * The editor must not see the press: it would drop the selection before the click.
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => askSelection(editor)}
+                                className="ml-2 flex rounded-full shadow-md ring-2 ring-background transition-transform hover:scale-110 focus-visible:ring-ring focus-visible:outline-none"
+                            >
+                                <AssistantAvatar
+                                    {...(assistantRef.current ?? {})}
+                                    className="size-6"
+                                />
+                            </button>,
+                        );
+                        editor.addContentWidget(hintWidget);
+                        hintShown = true;
+                    } else if (wanted) {
+                        editor.layoutContentWidget(hintWidget);
+                    } else if (hintShown) {
+                        editor.removeContentWidget(hintWidget);
+                        hintShown = false;
+                    }
+                };
+
+                editor.onDidChangeCursorSelection(syncHint);
+                syncHintRef.current = syncHint;
+
+                if (askTrigger) {
+                    askTrigger.current = () => askSelection(editor);
+                }
                 // * Copied lines are remembered with their file and line numbers: pasted into the chat they become a tag, not the raw code.
                 editor.getDomNode()?.addEventListener('copy', () => {
                     const range = editor.getSelection();
@@ -251,28 +545,12 @@ export default function MonacoCode({
                 editor.addAction({
                     id: 'pm.chat-about-selection',
                     label: 'Chat với AI về đoạn này',
+                    // * Cmd+L (Ctrl+L), like Cursor; the context menu shows it next to the label.
+                    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL],
                     contextMenuGroupId: '9_cutcopypaste',
                     contextMenuOrder: 0,
                     precondition: 'editorHasSelection',
-                    run: (instance) => {
-                        const range = instance.getSelection();
-                        const model = instance.getModel();
-
-                        if (range === null || model === null) {
-                            return;
-                        }
-
-                        askRef.current?.({
-                            startLine: range.startLineNumber,
-                            // * A selection that ends at a line's very start does not include that line.
-                            endLine:
-                                range.endColumn === 1 &&
-                                range.endLineNumber > range.startLineNumber
-                                    ? range.endLineNumber - 1
-                                    : range.endLineNumber,
-                            text: model.getValueInRange(range),
-                        });
-                    },
+                    run: (instance) => askSelection(instance),
                 });
             }}
             options={{

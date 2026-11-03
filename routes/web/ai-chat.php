@@ -40,6 +40,7 @@ Route::prefix('ai-chat')->name('ai-chat.')->group(function () {
 
         // * Per-project skills, subagents and MCP servers (all off by default); creating one writes into a local project, so `store` needs `ai.local-write` (below).
         Route::get('tools', [AiProjectToolsController::class, 'index'])->middleware('throttle:30,1,ai-tools')->name('tools.index');
+        Route::get('tools/info', [AiProjectToolsController::class, 'info'])->middleware('throttle:30,1,ai-tools')->name('tools.info');
         Route::put('tools', [AiProjectToolsController::class, 'toggle'])->middleware('throttle:60,1,ai-tools')->name('tools.toggle');
 
         // * Code tab: the GitHub repos an admin added to the project list (names only, per admin).
@@ -71,6 +72,10 @@ Route::prefix('ai-chat')->name('ai-chat.')->group(function () {
         Route::delete('local/projects/{key}', [LocalWorkspaceController::class, 'destroyProject'])->where('key', '[a-z0-9_-]{1,40}')->middleware('throttle:20,1,ai-local-import')->name('local.projects.destroy');
         Route::post('local/find-folder', [LocalWorkspaceController::class, 'findFolder'])->middleware('throttle:20,1,ai-local-import')->name('local.find-folder');
         Route::post('local/exec', [LocalWorkspaceController::class, 'exec'])->middleware('throttle:30,1,ai-local-exec')->name('local.exec');
+        Route::post('local/commit-message', [LocalWorkspaceController::class, 'commitMessage'])->middleware([AuthorizeResource::class.':ai,use', 'throttle:10,1,ai'])->name('local.commit-message');
+        Route::post('local/commit', [LocalWorkspaceController::class, 'commit'])->middleware('throttle:20,1,ai-local-write')->name('local.commit');
+        Route::post('local/pull-request', [LocalWorkspaceController::class, 'pullRequest'])->middleware('throttle:5,1,ai-local-write')->name('local.pull-request');
+        Route::post('local/discard', [LocalWorkspaceController::class, 'discard'])->middleware('throttle:30,1,ai-local-write')->name('local.discard');
         Route::put('local/file', [LocalWorkspaceController::class, 'save'])->middleware('throttle:30,1,ai-local-write')->name('local.file.save');
         Route::post('messages/{message}/proposals/apply-local', [AiChatController::class, 'applyLocalProposals'])->middleware('throttle:20,1,ai-local-write')->name('proposals.apply-local');
         Route::post('messages/{message}/proposals/revert-local', [AiChatController::class, 'revertLocalProposals'])->middleware('throttle:20,1,ai-local-write')->name('proposals.revert-local');

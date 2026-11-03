@@ -1,5 +1,5 @@
 import { AccountLimit } from '@/components/integrations/account-limit';
-import { vendorShortName } from '@/lib/ai-account';
+import { accountDisplayName, vendorShortName } from '@/lib/ai-account';
 import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -54,7 +54,7 @@ export function AiUsageDialog({
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="flex max-h-[min(90vh,40rem)] flex-col sm:max-w-3xl">
+            <DialogContent className="flex max-h-[min(90vh,40rem)] flex-col sm:max-w-5xl">
                 <DialogHeader>
                     <DialogTitle>Thống kê AI</DialogTitle>
                     <DialogDescription>
@@ -112,16 +112,12 @@ export function AiUsageDialog({
                         )}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                    Số lượt gọi là của riêng bạn trong 24 giờ và 7 ngày qua,
-                    tính từ các lần gọi AI thật (không lưu nội dung). Trạng thái
-                    tính từ lượt gọi gần nhất của tài khoản: &quot;Hết hạn
-                    mức&quot; chỉ hiện khi lỗi hạn mức gần nhất mới hơn lần gọi
-                    thành công gần nhất. Không có số hạn mức còn lại vì nhà cung
-                    cấp không cung cấp dữ liệu này. Số token là ước lượng
-                    (khoảng 4 ký tự một token) từ độ dài văn bản, không phải số
-                    liệu của nhà cung cấp; cửa sổ ngữ cảnh là giới hạn cho mỗi
-                    yêu cầu, không phải hạn mức, và hạn mức còn lại không có
-                    sẵn.
+                    Lượt gọi là của riêng bạn trong 24 giờ và 7 ngày qua (không
+                    lưu nội dung). &quot;Hết hạn mức&quot; hiện khi lỗi hạn mức
+                    mới hơn lần gọi thành công gần nhất; nhà cung cấp không cho
+                    biết hạn mức còn lại. Token chỉ là ước lượng (~4 ký tự một
+                    token); cửa sổ ngữ cảnh là giới hạn mỗi yêu cầu, không phải
+                    hạn mức.
                 </p>
                 <DialogFooter>
                     <Button
@@ -155,7 +151,9 @@ function UsageRow({
             />
             <span className="min-w-40 flex-1 leading-tight">
                 <span className="flex items-center gap-2">
-                    <span className="truncate font-medium">{account.name}</span>
+                    <span className="truncate font-medium">
+                        {accountDisplayName(account.name)}
+                    </span>
                     {inUse && (
                         <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-xs text-accent-foreground">
                             Đang dùng
@@ -163,7 +161,18 @@ function UsageRow({
                     )}
                 </span>
                 <span className="block truncate text-xs text-muted-foreground">
-                    {[vendorShortName(account.vendor), account.model]
+                    {[
+                        vendorShortName(account.vendor),
+                        account.model,
+                        // * One vendor can have several logins: how this one connects, and which token (last 5 characters) when it has one.
+                        account.auth_type === 'api_token' ? 'API token' : 'CLI',
+                        account.cli_login === null
+                            ? null
+                            : `Tài khoản: ${account.cli_login}`,
+                        account.token_tail === null
+                            ? null
+                            : `…${account.token_tail}`,
+                    ]
                         .filter(Boolean)
                         .join(' · ')}
                 </span>
@@ -208,8 +217,7 @@ function UsageRow({
                 </p>
                 <div className="flex items-center gap-2">
                     <span className="shrink-0 text-muted-foreground">
-                        Cửa sổ ngữ cảnh mỗi yêu cầu:{' '}
-                        {formatTokens(account.context_window)} token
+                        Ngữ cảnh: {formatTokens(account.context_window)} token
                     </span>
                     {account.largest_request !== null && (
                         <>
@@ -232,14 +240,14 @@ function UsageRow({
                                 />
                             </div>
                             <span className="shrink-0 text-muted-foreground">
-                                Yêu cầu lớn nhất ~
+                                Lớn nhất ~
                                 {formatTokens(account.largest_request)}
                             </span>
                         </>
                     )}
                 </div>
             </div>
-            <span className={cn('w-full text-xs sm:w-44', status.className)}>
+            <span className={cn('w-full text-xs', status.className)}>
                 {status.label}
                 {account.limit.state === 'limited' && (
                     <>

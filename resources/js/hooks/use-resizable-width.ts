@@ -107,8 +107,20 @@ export function useResizableWidth(
         save();
     };
 
+    // * Narrows the panel to `limit` when it is wider (not saved: it is a one-off, e.g. to make room for the chat).
+    const shrinkTo = useCallback(
+        (limit: number) => {
+            const next = clamp(Math.min(latest.current, limit));
+
+            latest.current = next;
+            setWidth(next);
+        },
+        [clamp],
+    );
+
     return {
         width,
+        shrinkTo,
         handleProps: {
             role: 'separator' as const,
             'aria-orientation': 'vertical' as const,

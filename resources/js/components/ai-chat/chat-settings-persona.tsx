@@ -396,7 +396,6 @@ export function ChatSettingsPersona({
     vendor,
     errors,
     busy,
-    onReset,
 }: {
     draft: AiChatSettings;
     onChange: <Key extends keyof AiChatSettings>(
@@ -410,7 +409,6 @@ export function ChatSettingsPersona({
     vendor?: { key: string; name: string };
     errors: PersonaErrors;
     busy: boolean;
-    onReset: () => void;
 }) {
     const fileInput = useRef<HTMLInputElement>(null);
     const [uploading, setUploading] = useState(false);
@@ -626,16 +624,6 @@ export function ChatSettingsPersona({
                     placeholder="Ví dụ: Trả lời ngắn gọn, ưu tiên ví dụ bằng PHP."
                     description={`${instructions.length} / ${MAX_INSTRUCTIONS} ký tự. Được thêm sau các quy tắc cố định về bảo mật và định dạng, không thay thế chúng.`}
                 />
-                <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 self-start px-2 text-muted-foreground"
-                    disabled={busy}
-                    onClick={onReset}
-                >
-                    Khôi phục mặc định
-                </Button>
             </div>
         </div>
     );

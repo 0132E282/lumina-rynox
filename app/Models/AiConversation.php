@@ -25,7 +25,7 @@ class AiConversation extends Model
 {
     public const TITLE_LENGTH = 60;
 
-    protected $fillable = ['user_id', 'title', 'repo'];
+    protected $fillable = ['user_id', 'title', 'repo', 'parent_id'];
 
     protected static function booted(): void
     {

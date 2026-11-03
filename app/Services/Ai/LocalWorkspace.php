@@ -726,6 +726,114 @@ class LocalWorkspace
         return self::hash($this->read($rootId, $path));
     }
 
+    /**
+     * Puts a file back as git `HEAD` has it: a changed or deleted file gets its committed text again, a new file (not in `HEAD`) is removed.
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function discard(string $rootId, string $path): void
+    {
+        $head = $this->headContent($rootId, $path);
+
+        if ($head !== null) {
+            $this->write($rootId, $path, $head, $this->currentHash($rootId, $path));
+
+            return;
+        }
+
+        $relative = $this->allowedRelative($path);
+        $full = $this->parentDirectory($rootId, $relative).DIRECTORY_SEPARATOR.basename($relative);
+
+        if (is_link($full) || ! is_file($full) || ! unlink($full)) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::WRITE_FAILED, 500);
+        }
+    }
+
+    /**
+     * The text the AI reads to write a commit message: `git diff HEAD` of the listed files (never the hidden ones) plus the names of the new files.
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function diffForCommit(string $rootId): string
+    {
+        $changes = $this->changes($rootId);
+        $paths = array_column($changes['files'], 'path');
+
+        if (! $changes['git'] || $paths === []) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::NOTHING_TO_COMMIT, 422);
+        }
+
+        $new = array_column(array_filter($changes['files'], fn (array $file): bool => $file['status'] === 'A'), 'path');
+        $diff = Process::path($this->rootPath($rootId))->timeout(30)->run(['git', '--no-optional-locks', 'diff', 'HEAD', '--', ...$paths]);
+
+        return ($new === [] ? '' : 'Tệp mới: '.implode(', ', $new)."\n\n").$diff->output();
+    }
+
+    /**
+     * Commits what the change list shows (never the files the deny list hides, never other staged files) with the given message; nothing is pushed.
+     *
+     * @return array{hash: string, files: int}
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function commit(string $rootId, string $message): array
+    {
+        $changes = $this->changes($rootId);
+        $paths = array_column($changes['files'], 'path');
+
+        if (! $changes['git'] || $paths === []) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::NOTHING_TO_COMMIT, 422);
+        }
+
+        $root = $this->rootPath($rootId);
+        $added = Process::path($root)->timeout(30)->run(['git', 'add', '--', ...$paths]);
+        $done = $added->successful() ? Process::path($root)->timeout(60)->run(['git', 'commit', '-m', $message, '--', ...$paths]) : $added;
+
+        if (! $done->successful()) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::COMMIT_FAILED, 422);
+        }
+
+        $hash = Process::path($root)->timeout(15)->run(['git', 'rev-parse', '--short', 'HEAD']);
+
+        return ['hash' => trim($hash->output()), 'files' => count($paths)];
+    }
+
+    /**
+     * "Pull request" of the change list: a new branch with the listed files in one commit, pushed to origin, then the pull request on GitHub.
+     * ! This leaves the machine: the push uses the person's own git login, the pull request the connected GitHub token. Only the branch of this commit is pushed, never the base.
+     *
+     * @return array{url: string, branch: string, hash: string, files: int}
+     *
+     * @throws LocalWorkspaceException|GithubException
+     */
+    public function pullRequest(string $rootId, string $title, string $body, ?string $base): array
+    {
+        $root = $this->rootPath($rootId);
+        $remote = Process::path($root)->timeout(15)->run(['git', 'config', '--get', 'remote.origin.url']);
+
+        if (! $remote->successful() || ! preg_match('#github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$#', trim($remote->output()), $match)) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::NO_GITHUB_REMOTE, 422);
+        }
+
+        $current = trim(Process::path($root)->timeout(15)->run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])->output());
+        $branch = 'ai/'.now()->format('Ymd-His');
+
+        if (! Process::path($root)->timeout(15)->run(['git', 'switch', '-c', $branch])->successful()) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::BRANCH_FAILED, 422);
+        }
+
+        $committed = $this->commit($rootId, $title.($body === '' ? '' : "\n\n".$body));
+        $pushed = Process::path($root)->timeout(90)->env(['GIT_TERMINAL_PROMPT' => '0'])->run(['git', 'push', '--set-upstream', 'origin', $branch]);
+
+        if (! $pushed->successful()) {
+            throw new LocalWorkspaceException(LocalWorkspaceException::PUSH_FAILED, 422);
+        }
+
+        $url = app(GithubWriter::class)->pullRequestFor($match[1], $base ?? ($current === 'HEAD' ? 'main' : $current), $branch, $title, $body);
+
+        return ['url' => $url, 'branch' => $branch, 'hash' => $committed['hash'], 'files' => $committed['files']];
+    }
+
     public static function hash(string $content): string
     {
         return hash('sha256', $content);
@@ -788,13 +896,20 @@ class LocalWorkspace
         $activity->record('tree', "local {$rootId}", count($paths).' tệp');
         $sections = ["Thư mục local: {$rootId}\nCác tệp (tối đa 300):\n".implode("\n", array_slice($paths, 0, 300))];
         $named = 0;
+        $read = [];
+        // * Files the person tagged with `path` or `path:lines` come first, even when the tree does not list them (a path through a link, for instance); then the rest of the tree by name.
+        preg_match_all('/`([^`\s:]+)(?::\d+(?:[-–]\d+)?)?`/u', $message, $tagged);
+        $candidates = [...array_unique($tagged[1]), ...array_filter(
+            $paths,
+            fn (string $path): bool => str_contains($message, $path) || str_contains($message, basename($path)),
+        )];
 
-        foreach ($paths as $path) {
+        foreach ($candidates as $path) {
             if ($named >= 4) {
                 break;
             }
 
-            if (! str_contains($message, $path) && ! str_contains($message, basename($path))) {
+            if (isset($read[$path])) {
                 continue;
             }
 
@@ -803,6 +918,8 @@ class LocalWorkspace
             } catch (LocalWorkspaceException) {
                 continue;
             }
+
+            $read[$path] = true;
 
             // * Same tag cleaning as every other data block: the file cannot close its own block.
             $clean = preg_replace('/<\/?\s*[a-z_]*_data\b[^>]*>/iu', '', mb_substr($content, 0, 8000)) ?? '';

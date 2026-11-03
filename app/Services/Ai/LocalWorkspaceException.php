@@ -29,9 +29,21 @@ final class LocalWorkspaceException extends RuntimeException
 
     public const CONFLICT = 'Tệp đã thay đổi kể từ lúc đề xuất. Hãy yêu cầu AI đề xuất lại.';
 
+    public const REVERT_CONFLICT = 'Không hoàn tác được: tệp đã được sửa tiếp sau thay đổi này. Xem lại thay đổi rồi dùng "Hoàn tác thay đổi" ở mục Thay đổi (về bản git) nếu muốn bỏ.';
+
     public const REVERT_UNAVAILABLE = 'Không hoàn tác được: tệp mới tạo hoặc thay đổi quá lớn để dựng lại bản cũ.';
 
     public const WRITE_FAILED = 'Không ghi được tệp.';
+
+    public const NOTHING_TO_COMMIT = 'Không có thay đổi nào để commit.';
+
+    public const COMMIT_FAILED = 'Không commit được. Kiểm tra tên/email git và hook của dự án.';
+
+    public const NO_GITHUB_REMOTE = 'Dự án này chưa có remote GitHub (origin) để tạo Pull request.';
+
+    public const BRANCH_FAILED = 'Không tạo được nhánh mới cho Pull request.';
+
+    public const PUSH_FAILED = 'Không push được nhánh lên GitHub. Commit đã nằm trong nhánh mới trên máy; kiểm tra quyền git của bạn.';
 
     public const BAD_FOLDER = 'Thư mục không hợp lệ hoặc không tồn tại.';
 

@@ -3,6 +3,13 @@ import { Plus } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -310,28 +317,39 @@ export function ChatSettingsTools({
             )}
             {kind !== 'mcp' && catalog?.can_create && (
                 <>
-                    {adding ? (
-                        <CreateForm
-                            kind={kind}
-                            project={project}
-                            onCancel={() => setAdding(false)}
-                            onCreated={() => {
-                                setAdding(false);
-                                load();
-                            }}
-                        />
-                    ) : (
-                        <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="self-start"
-                            onClick={() => setAdding(true)}
-                        >
-                            <Plus aria-hidden="true" />
-                            Thêm {kind === 'skill' ? 'skill' : 'subagent'} mới
-                        </Button>
-                    )}
+                    <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="self-start"
+                        onClick={() => setAdding(true)}
+                    >
+                        <Plus aria-hidden="true" />
+                        Thêm {kind === 'skill' ? 'skill' : 'subagent'} mới
+                    </Button>
+                    <Dialog open={adding} onOpenChange={setAdding}>
+                        <DialogContent className="sm:max-w-xl">
+                            <DialogHeader>
+                                <DialogTitle>
+                                    Thêm{' '}
+                                    {kind === 'skill' ? 'skill' : 'subagent'}{' '}
+                                    mới
+                                </DialogTitle>
+                                <DialogDescription>
+                                    Tạo tệp mới trong dự án đang chọn.
+                                </DialogDescription>
+                            </DialogHeader>
+                            <CreateForm
+                                kind={kind}
+                                project={project}
+                                onCancel={() => setAdding(false)}
+                                onCreated={() => {
+                                    setAdding(false);
+                                    load();
+                                }}
+                            />
+                        </DialogContent>
+                    </Dialog>
                 </>
             )}
             {kind !== 'mcp' && !none && catalog && !catalog.can_create && (
@@ -398,7 +416,7 @@ function CreateForm({
     };
 
     return (
-        <div className="flex flex-col gap-3 rounded-md border p-3">
+        <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
                 <Label htmlFor={`new-${kind}-name`}>Tên</Label>
                 <Input

@@ -162,7 +162,7 @@ export function MessengerAccountDialog({
                     <DialogDescription>
                         {editing
                             ? 'Quyền và phạm vi chỉ áp dụng cho tài khoản này.'
-                            : 'Đăng nhập một tài khoản Facebook bằng cookie, hoặc bằng Facebook đang đăng nhập trên máy này. Các tài khoản khác giữ nguyên.'}
+                            : 'Đăng nhập một tài khoản Facebook bằng cookie, hoặc mở trình duyệt để đăng nhập rồi tự lấy cookie. Các tài khoản khác giữ nguyên.'}
                     </DialogDescription>
                 </DialogHeader>
 
@@ -240,12 +240,12 @@ export function MessengerAccountDialog({
                             type="button"
                             variant="secondary"
                             disabled={submitting || !riskAcknowledged}
-                            title="Mở Chrome trên máy này, đăng nhập Facebook rồi tự lấy cookie"
+                            title="Mở trình duyệt Chrome, đăng nhập Facebook rồi tự lấy cookie"
                             onClick={() => void submitLogin(true)}
                         >
                             {browserLogin
                                 ? 'Đang chờ đăng nhập trong Chrome...'
-                                : 'Đăng nhập bằng Facebook trên máy này'}
+                                : 'Mở trình duyệt để đăng nhập'}
                         </Button>
                     )}
                     <Button

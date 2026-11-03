@@ -430,16 +430,7 @@ export function ProjectsTab({
                                             aria-label={`Xoá dự án ${row.full_name}`}
                                             title="Xoá dự án"
                                             onClick={() =>
-                                                // * A GitHub project goes at once (hidden, its chats deleted); a local folder still asks.
-                                                row.full_name.startsWith(
-                                                    'local:',
-                                                )
-                                                    ? setPendingDelete(
-                                                          row.full_name,
-                                                      )
-                                                    : confirmDelete(
-                                                          row.full_name,
-                                                      )
+                                                setPendingDelete(row.full_name)
                                             }
                                             className="absolute top-1 right-1 size-7 text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:bg-transparent hover:text-destructive"
                                         >

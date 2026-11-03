@@ -21,7 +21,7 @@ function ModuleCard({
 }: {
     module: PersonalModule;
     title: string;
-    footer: ReactNode;
+    footer?: ReactNode;
     /** * `undefined` while deferred, `null` when the load failed. */
     summary: unknown;
     children: ReactNode;
@@ -63,7 +63,9 @@ function ModuleCard({
                     ) : (
                         <>
                             {children}
-                            <div className="mt-auto pt-2">{footer}</div>
+                            {footer && (
+                                <div className="mt-auto pt-2">{footer}</div>
+                            )}
                         </>
                     )}
                 </Deferred>
@@ -101,12 +103,21 @@ function TaskCard({ summary }: { summary?: TaskDashboardSummary | null }) {
             module="tasks"
             title="Công việc"
             summary={summary}
-            footer={<CardLink href="/tasks">Xem tất cả</CardLink>}
+            footer={
+                summary && summary.pending === 0 ? undefined : (
+                    <CardLink href="/tasks">Xem tất cả</CardLink>
+                )
+            }
         >
             {summary && summary.pending === 0 ? (
                 <EmptyState
                     message="Không còn công việc nào chưa xong."
-                    action={<CardLink href="/tasks">Thêm công việc</CardLink>}
+                    action={
+                        <div className="flex flex-wrap gap-2">
+                            <CardLink href="/tasks">Thêm công việc</CardLink>
+                            <CardLink href="/tasks">Xem tất cả</CardLink>
+                        </div>
+                    }
                 />
             ) : (
                 summary && (
@@ -157,7 +168,7 @@ export function PersonalSummary({
             <h2 id="personal-heading" className="sr-only">
                 Công việc và cá nhân
             </h2>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4">
                 {personalModules.includes('tasks') && (
                     <TaskCard summary={tasksSummary} />
                 )}

@@ -53,6 +53,56 @@ final class ProjectTools
     }
 
     /**
+     * Rules (`.agents/rules/*.md`) and hooks (the `hooks` of `.claude/settings.json` and its local copy) of a project, for the read-only tabs.
+     *
+     * @return array{rules: list<array{name: string, description: string, path: string}>, hooks: list<array{event: string, matcher: string, command: string, source: string}>}
+     *
+     * @throws LocalWorkspaceException|GithubException
+     */
+    public function rulesAndHooks(string $project): array
+    {
+        $paths = $this->isLocal($project) ? $this->workspace->tree($this->rootOf($project))['paths'] : $this->github->browse($project)['paths'];
+        $read = function (string $path) use ($project): ?string {
+            try {
+                return $this->isLocal($project) ? $this->workspace->read($this->rootOf($project), $path) : $this->github->readFile($project, $path);
+            } catch (LocalWorkspaceException|GithubException) {
+                return null;
+            }
+        };
+
+        $rules = [];
+
+        foreach ($paths as $path) {
+            if (count($rules) >= self::MAX_ITEMS || preg_match('#^\.agents/rules/([^/]+)\.md$#', $path, $match) !== 1) {
+                continue;
+            }
+
+            $content = $read($path) ?? '';
+            // * The first heading, else the first line of text, is what the rule is about.
+            $title = preg_match('/^#{1,3}\s+(.+)$/m', $content, $heading) === 1 ? $heading[1] : (trim(strtok($content, "\n") ?: ''));
+            $rules[] = ['name' => $match[1], 'description' => Str::limit(trim($title, " \t#"), 160), 'path' => $path];
+        }
+
+        $hooks = [];
+
+        foreach (['.claude/settings.json', '.claude/settings.local.json'] as $file) {
+            $data = in_array($file, $paths, true) ? json_decode($read($file) ?? '', true) : null;
+
+            foreach (is_array($data) && is_array($data['hooks'] ?? null) ? $data['hooks'] : [] as $event => $groups) {
+                foreach (is_array($groups) ? $groups : [] as $group) {
+                    foreach (is_array($group['hooks'] ?? null) ? $group['hooks'] : [] as $hook) {
+                        if (count($hooks) < self::MAX_ITEMS * 2 && is_string($hook['command'] ?? null)) {
+                            $hooks[] = ['event' => (string) $event, 'matcher' => is_string($group['matcher'] ?? null) ? $group['matcher'] : '', 'command' => Str::limit($hook['command'], 300), 'source' => $file];
+                        }
+                    }
+                }
+            }
+        }
+
+        return ['rules' => $rules, 'hooks' => $hooks];
+    }
+
+    /**
      * Names and file paths only (no file is read). A name found in several tool folders keeps the path of the highest-priority one and lists every source.
      *
      * @return array{skills: array<string, string>, agents: array<string, string>, sources: array{skills: array<string, list<string>>, agents: array<string, list<string>>}}

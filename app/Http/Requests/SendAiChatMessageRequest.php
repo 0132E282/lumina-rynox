@@ -33,10 +33,14 @@ class SendAiChatMessageRequest extends FormRequest
         return [
             'message' => ['required', 'string', 'max:'.self::MAX_MESSAGE_LENGTH],
             'conversation_id' => ['nullable', 'uuid'],
+            // * A comment box under code: the new thread becomes a child session of this chat.
+            'parent_conversation_id' => ['nullable', 'uuid'],
             'ai_account_id' => ['nullable', 'integer'],
             'ai_model' => ['nullable', 'string', 'max:100'],
             'mode' => ['nullable', Rule::in([AiAssistant::MODE_AUTO, AiAssistant::MODE_PLAN])],
             'auto_pr' => ['nullable', 'boolean'],
+            // * The comment box under code: edits to a local folder wait for the person's tick instead of being written at once.
+            'hold_edits' => ['nullable', 'boolean'],
             'local_root' => ['nullable', 'string', 'regex:/^[a-z0-9_-]{1,40}$/', 'prohibits:repo'],
             'repo' => ['nullable', 'string', 'max:140', 'regex:#^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$#'],
             'extra_repos' => ['nullable', 'array', 'max:'.self::MAX_EXTRA_SOURCES],

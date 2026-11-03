@@ -24,7 +24,7 @@ export function UnifiedDiff({
         <div
             role="table"
             aria-label="Thay đổi của tệp"
-            className="max-h-[560px] overflow-auto font-mono text-[13px] leading-[1.6] select-text"
+            className="max-h-[85vh] overflow-auto font-mono text-[13px] leading-[1.6] select-text"
         >
             {rows.map((row, index) =>
                 row.kind === 'hunk' ? (

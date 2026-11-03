@@ -227,7 +227,6 @@ function PurposeCard({
     const usable = accounts.filter(
         (account) =>
             account.enabled &&
-            account.status === 'connected' &&
             (account.purposes === null ||
                 account.purposes.includes(purposeKey)),
     );
@@ -334,6 +333,11 @@ function PurposeCard({
                                                 className="size-5"
                                             />
                                             {account.name}
+                                            {account.status !== 'connected' && (
+                                                <span className="text-xs text-destructive">
+                                                    (đang lỗi)
+                                                </span>
+                                            )}
                                         </span>
                                     </SelectItem>
                                 ))}

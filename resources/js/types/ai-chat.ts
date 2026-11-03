@@ -15,6 +15,8 @@ export type AiChatConversation = {
 /** * A file edit the AI proposed for a GitHub repo; nothing is written until the person approves it. */
 export type AiChatProposal = {
     id: number;
+    /** * The answer this edit belongs to. */
+    message_id?: number;
     repo: string;
     path: string;
     action: 'create' | 'update';
@@ -174,6 +176,12 @@ export type AiUsageAccount = {
     vendor: string;
     model: string | null;
     enabled: boolean;
+    /** * How the account connects: `api_token` (vendor HTTP API) or `session_token` (the vendor's CLI). */
+    auth_type: 'api_token' | 'session_token';
+    /** * The email the account's CLI is logged in with on this machine; null for an API account or when it cannot be read. */
+    cli_login: string | null;
+    /** * The last 5 characters of the account's token (null when it has none or it is too short to show a tail). */
+    token_tail: string | null;
     calls_24h: number;
     calls_7d: number;
     last_used_at: string | null;

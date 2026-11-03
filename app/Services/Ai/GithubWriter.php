@@ -54,6 +54,24 @@ class GithubWriter
         return $url;
     }
 
+    /**
+     * A pull request from a branch that is already pushed (a local folder pushes its own branch).
+     *
+     * @return string URL of the new pull request
+     *
+     * @throws GithubException
+     */
+    public function pullRequestFor(string $repo, string $base, string $head, string $title, string $body): string
+    {
+        $url = $this->send('POST', "/repos/{$repo}/pulls", ['title' => $title, 'head' => $head, 'base' => $base, 'body' => $body])->json('html_url');
+
+        if (! is_string($url) || ! str_starts_with($url, 'https://github.com/')) {
+            throw new GithubException(GithubException::FAILED);
+        }
+
+        return $url;
+    }
+
     /** @param  array<string, mixed>|null  $payload */
     private function send(string $method, string $path, ?array $payload = null): Response
     {

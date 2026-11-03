@@ -1,3 +1,5 @@
+import { FileCode, RotateCcw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentProps } from 'react';
 import { doneTyping, isTyping } from '@/lib/typing';
@@ -5,6 +7,7 @@ import { ProposalText } from '@/components/ai-chat/proposal-text';
 import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
 import { VoiceAnswer } from '@/components/ai-chat/voice-answer';
 import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
+import { splitFileTags } from '@/lib/code-reference';
 import { asksForImage } from '@/lib/image-request';
 import { ProposalCard } from '@/components/ai-chat/proposal-card';
 import type {
@@ -157,6 +160,38 @@ function PendingStatus({
 }
 
 /** * Message thread: user bubble on the right, assistant text on the left. User/error content is plain text (line breaks kept); assistant content is markdown. Never raw HTML. */
+/** * A sent message: the files it was sent with show as tags (like in the box it was typed in) before the text. */
+function UserContent({ content }: { content: string }) {
+    const { files, text } = splitFileTags(content);
+
+    if (files.length === 0) {
+        return <>{content}</>;
+    }
+
+    return (
+        <>
+            <span className="flex flex-wrap gap-1.5">
+                {files.map((path, index) => (
+                    <span
+                        key={`${path}-${index}`}
+                        title={path}
+                        className="flex max-w-60 items-center gap-1 rounded-md border bg-background/60 px-1.5 py-0.5 text-xs"
+                    >
+                        <FileCode
+                            aria-hidden="true"
+                            className="size-3.5 shrink-0 text-muted-foreground"
+                        />
+                        <span className="truncate font-medium">
+                            {path.split('/').pop() ?? path}
+                        </span>
+                    </span>
+                ))}
+            </span>
+            {text !== '' && <span className="mt-2 block">{text}</span>}
+        </>
+    );
+}
+
 export function ChatThread({
     items,
     pending,
@@ -165,6 +200,7 @@ export function ChatThread({
     onChoose,
     liveSteps = [],
     assistant,
+    onRetry,
 }: {
     items: ThreadItem[];
     pending: boolean;
@@ -178,6 +214,8 @@ export function ChatThread({
     onChoose?: (text: string) => void;
     /** * Steps of the answer being waited for. */
     liveSteps?: AiChatActivityStep[];
+    /** * Asks again the last question that got an error; without it the error line has no button. */
+    onRetry?: () => void;
     /** Decorative avatars: the signed-in person's name/photo and the AI account's vendor. */
     assistant?: AssistantIdentity;
 }) {
@@ -343,9 +381,26 @@ export function ChatThread({
                                             }
                                         />
                                     </VoiceAnswer>
+                                ) : item.role === 'user' ? (
+                                    <UserContent content={item.content} />
                                 ) : (
                                     item.content
                                 )}
+                                {item.role === 'error' &&
+                                    onRetry &&
+                                    !pending &&
+                                    index === items.length - 1 && (
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={onRetry}
+                                            className="mt-2 flex h-7 gap-1.5 text-xs"
+                                        >
+                                            <RotateCcw aria-hidden="true" />
+                                            Gửi lại
+                                        </Button>
+                                    )}
                             </div>
                         </div>
                         {item.role === 'assistant' &&

@@ -10,7 +10,7 @@ import {
     FieldSeparator,
 } from '@/components/ui/field';
 import { useAppForm, z } from '@/hooks/use-app-form';
-import { GoogleIcon, MetaIcon } from '@/icons';
+import { GoogleIcon } from '@/icons';
 
 const loginSchema = z.object({
     email: z.string().email('Vui lòng nhập địa chỉ email hợp lệ'),
@@ -130,24 +130,14 @@ export default function LoginPage() {
                                 Or continue with
                             </FieldSeparator>
 
-                            <UIField className="grid grid-cols-2 gap-4">
+                            <UIField>
                                 <Button
                                     variant="outline"
                                     type="button"
-                                    className="flex items-center justify-center gap-2"
+                                    className="flex w-full items-center justify-center gap-2"
                                 >
                                     <GoogleIcon className="h-5 w-5" />
                                     <span className="font-medium">Google</span>
-                                </Button>
-                                <Button
-                                    variant="outline"
-                                    type="button"
-                                    className="flex items-center justify-center gap-2"
-                                >
-                                    <MetaIcon className="h-5 w-5" />
-                                    <span className="font-medium">
-                                        Facebook
-                                    </span>
                                 </Button>
                             </UIField>
 

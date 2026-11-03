@@ -88,6 +88,11 @@ final class AiUsageStats
                     // * The model of the latest call, else the account's own.
                     'model' => $latest->get($all?->last_id)?->model ?? $account->model,
                     'enabled' => $account->enabled,
+                    'auth_type' => $account->auth_type,
+                    // * A CLI account: the email its CLI is logged in with on this machine (null when unreadable).
+                    'cli_login' => $account->auth_type === AiAccount::AUTH_SESSION ? app(CliIdentity::class)->of($account->vendor) : null,
+                    // * Only the last 5 characters, enough to tell two logins of the same vendor apart; never more of the token.
+                    'token_tail' => $this->tail($account->token()),
                     'calls_24h' => (int) ($mine?->calls_24h ?? 0),
                     'calls_7d' => (int) ($mine?->calls_7d ?? 0),
                     'last_used_at' => $this->iso($mine?->last_used_at),
@@ -103,6 +108,11 @@ final class AiUsageStats
                 ];
             })->values()->all(),
         ];
+    }
+
+    private function tail(?string $token): ?string
+    {
+        return $token === null || mb_strlen($token) < 12 ? null : mb_substr($token, -5);
     }
 
     /**

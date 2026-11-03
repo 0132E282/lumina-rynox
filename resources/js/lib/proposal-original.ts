@@ -92,3 +92,31 @@ export function diffSides(diff: string): { before: string; after: string } {
 
     return { before: before.join('\n'), after: after.join('\n') };
 }
+
+/** * The 1-based line of the first changed (added) line of an applied edit in the file now; null when the diff cannot be found in it (the file changed since). */
+export function firstChangedLine(content: string, diff: string): number | null {
+    const block: string[] = [];
+
+    for (const line of diff.split('\n')) {
+        if (line === '…') {
+            break;
+        }
+
+        if (!DIFF_LINE.test(line)) {
+            return null;
+        }
+
+        if (line[0] !== '-') {
+            block.push(line);
+        }
+    }
+
+    const added = block.findIndex((line) => line[0] === '+');
+    const start = findRun(
+        content.split('\n'),
+        block.map((line) => line.slice(2)),
+        0,
+    );
+
+    return added === -1 || start === -1 ? null : start + added + 1;
+}

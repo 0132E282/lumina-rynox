@@ -210,7 +210,7 @@ export default function Dashboard({
         : [];
 
     return (
-        <main className="flex w-full flex-1 flex-col gap-8 p-4 md:p-6">
+        <main className="flex w-full flex-1 flex-col gap-6 p-4 md:p-6">
             <Head title="Tổng quan" />
 
             {overview.length > 0 && (
@@ -226,13 +226,13 @@ export default function Dashboard({
                                     className="group rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                                 >
                                     <Card className="h-full shadow-none transition-colors hover:bg-muted/40">
-                                        <CardContent className="flex items-start justify-between gap-3 p-5">
+                                        <CardContent className="flex items-start justify-between gap-3 p-4">
                                             <div className="min-w-0">
                                                 <p className="text-sm text-muted-foreground">
                                                     {label}
                                                 </p>
                                                 <p
-                                                    className={`mt-2 text-2xl font-semibold tracking-tight tabular-nums ${key === 'failed' && value > 0 ? 'text-destructive' : ''}`}
+                                                    className={`mt-1 text-2xl font-semibold tracking-tight tabular-nums ${key === 'failed' && value > 0 ? 'text-destructive' : value === 0 ? 'text-muted-foreground' : ''}`}
                                                 >
                                                     {numberFormat.format(value)}
                                                 </p>
@@ -250,13 +250,31 @@ export default function Dashboard({
                 </section>
             )}
 
-            <PersonalSummary
-                personalModules={personalModules}
-                tasksSummary={tasksSummary}
-            />
+            {/* * Tasks sit beside the shortcuts (one column of short rows), so the row has no empty half. */}
+            <div
+                className={
+                    personalModules.length > 0
+                        ? 'grid items-start gap-4 lg:grid-cols-3'
+                        : ''
+                }
+            >
+                {personalModules.length > 0 && (
+                    <div className="min-w-0 lg:col-span-2">
+                        <PersonalSummary
+                            personalModules={personalModules}
+                            tasksSummary={tasksSummary}
+                        />
+                    </div>
+                )}
 
-            <section aria-labelledby="cms-heading" className="space-y-4">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <section
+                    aria-label="Lối tắt quản trị"
+                    className={
+                        personalModules.length > 0
+                            ? 'flex flex-col gap-3'
+                            : 'grid grid-cols-1 gap-3 sm:grid-cols-3'
+                    }
+                >
                     {cmsSections.map(({ key, label, href, icon: Icon }) => (
                         <Link
                             key={key}
@@ -264,9 +282,9 @@ export default function Dashboard({
                             className="group rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                         >
                             <Card className="h-full shadow-none transition-colors hover:bg-muted/40">
-                                <CardContent className="flex items-center justify-between gap-4 p-5">
+                                <CardContent className="flex items-center justify-between gap-4 p-3">
                                     <div className="flex min-w-0 items-center gap-3">
-                                        <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                                        <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted">
                                             <Icon
                                                 aria-hidden="true"
                                                 className="size-4 text-muted-foreground"
@@ -277,7 +295,7 @@ export default function Dashboard({
                                         </span>
                                     </div>
                                     <div className="flex shrink-0 items-center gap-2">
-                                        <span className="text-lg font-semibold tabular-nums">
+                                        <span className="text-base font-semibold tabular-nums">
                                             {numberFormat.format(stats[key])}
                                         </span>
                                         <ArrowUpRight
@@ -289,8 +307,8 @@ export default function Dashboard({
                             </Card>
                         </Link>
                     ))}
-                </div>
-            </section>
+                </section>
+            </div>
 
             <section aria-labelledby="analytics-heading" className="space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -426,17 +444,19 @@ export default function Dashboard({
                             className="shadow-none"
                             role={analyticsError ? 'alert' : undefined}
                         >
-                            <CardContent className="flex flex-col items-start gap-3 p-6">
-                                <p className="font-medium">
-                                    {analyticsError
-                                        ? 'Không tải được dữ liệu Google Analytics.'
-                                        : 'Google Analytics chưa được kết nối.'}
-                                </p>
-                                <p className="max-w-2xl text-sm text-muted-foreground">
-                                    {analyticsError
-                                        ? 'Kiểm tra GA4 Property ID, quyền Viewer của service account và quyền truy cập Google Analytics Data API.'
-                                        : 'Thêm GA4 Property ID và service account JSON key để hiển thị lượt truy cập, biểu đồ, nguồn truy cập và thiết bị.'}
-                                </p>
+                            <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
+                                <div className="min-w-0 space-y-1">
+                                    <p className="font-medium">
+                                        {analyticsError
+                                            ? 'Không tải được dữ liệu Google Analytics.'
+                                            : 'Google Analytics chưa được kết nối.'}
+                                    </p>
+                                    <p className="max-w-2xl text-sm text-muted-foreground">
+                                        {analyticsError
+                                            ? 'Kiểm tra GA4 Property ID, quyền Viewer của service account và quyền truy cập Google Analytics Data API.'
+                                            : 'Thêm GA4 Property ID và service account JSON key để hiển thị lượt truy cập, biểu đồ, nguồn truy cập và thiết bị.'}
+                                    </p>
+                                </div>
                                 <Button asChild variant="outline" size="sm">
                                     <Link href="/settings/google-analytics">
                                         {analyticsError

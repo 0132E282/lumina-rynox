@@ -67,6 +67,29 @@ class AiProjectToolsController extends Controller
         ]);
     }
 
+    /** * Rules and hooks of a project (read-only tabs): same permission and local guards as the catalog. */
+    public function info(Request $request): JsonResponse
+    {
+        $project = $request->validate(['project' => self::PROJECT_RULE])['project'];
+        $empty = ['rules' => [], 'hooks' => [], 'message' => null];
+
+        if ($this->tools->isLocal($project)) {
+            if (! ResourcePermission::allows($request->user(), 'ai', 'local-read')) {
+                return response()->json([...$empty, 'message' => 'Bạn chưa có quyền đọc tệp local.']);
+            }
+
+            if (($refusal = $this->workspace->refusal($request)) !== null) {
+                return response()->json([...$empty, 'message' => $refusal]);
+            }
+        }
+
+        try {
+            return response()->json([...$empty, ...$this->tools->rulesAndHooks($project)]);
+        } catch (LocalWorkspaceException|GithubException $exception) {
+            return response()->json([...$empty, 'message' => $exception->getMessage()]);
+        }
+    }
+
     public function toggle(Request $request): JsonResponse
     {
         $global = $request->input('project') === ProjectTools::GLOBAL;

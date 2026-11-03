@@ -80,7 +80,7 @@ final class CliLlmClient implements LlmClient
                 }
             })->wait();
         } catch (ProcessTimedOutException) {
-            throw new AiException(AiException::TIMEOUT);
+            throw new AiException(AiException::TIMEOUT, null, 'CLI '.$this->vendor.' chạy quá '.self::TIMEOUT_SECONDS.' giây');
         } catch (ExceptionInterface) {
             throw new AiException(AiException::CLI_NOT_FOUND);
         }
@@ -126,7 +126,7 @@ final class CliLlmClient implements LlmClient
                     }
                 });
         } catch (ProcessTimedOutException) {
-            throw new AiException(AiException::TIMEOUT);
+            throw new AiException(AiException::TIMEOUT, null, 'CLI '.$this->vendor.' chạy quá '.self::TIMEOUT_SECONDS.' giây');
         } catch (ExceptionInterface) {
             throw new AiException(AiException::CLI_NOT_FOUND);
         }
@@ -142,7 +142,7 @@ final class CliLlmClient implements LlmClient
                 $quota => AiException::QUOTA,
                 $result->exitCode() === 127 => AiException::CLI_NOT_FOUND,
                 default => AiException::CLI_UNAVAILABLE,
-            }, $quota ? QuotaLimit::parse($output) : null);
+            }, $quota ? QuotaLimit::parse($output) : null, 'CLI '.$this->vendor.' thoát với mã '.$result->exitCode());
         }
 
         // * Claude answers in stream-json: its `result` line is the text; any other output (older CLI) is the text itself.

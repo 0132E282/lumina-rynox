@@ -128,7 +128,7 @@ class AiChatController extends Controller
      */
     private function recents(Admin $user): array
     {
-        return Cache::remember(self::recentsCacheKey($user->id), self::RECENTS_CACHE_SECONDS, fn (): array => AiConversation::query()->ownedBy($user)->latest('updated_at')->latest('id')->limit(self::RECENTS)->get()
+        return Cache::remember(self::recentsCacheKey($user->id), self::RECENTS_CACHE_SECONDS, fn (): array => AiConversation::query()->ownedBy($user)->whereNull('parent_id')->latest('updated_at')->latest('id')->limit(self::RECENTS)->get()
             ->map(fn (AiConversation $conversation): array => $this->conversationPayload($conversation))->all());
     }
 
@@ -303,6 +303,7 @@ class AiChatController extends Controller
 
         $conversation = $conversationId === null ? null : AiConversation::query()->ownedBy($user)->where('uuid', $conversationId)->firstOrFail();
         $history = $conversation === null ? [] : $this->history($conversation);
+        $parentId = $conversation === null ? $this->parentId($request, $user) : null;
 
         // * Attached files and the repo go to the AI for this turn only; the thread keeps the text plus the names.
         $files = $request->file('attachments', []);
@@ -413,7 +414,7 @@ class AiChatController extends Controller
             ), AiMessage::MAX_CONTENT_LENGTH, '');
         } catch (AiException|GithubException|LocalWorkspaceException $exception) {
             // * A coding chat is kept even when the answer failed (quota, timeout...): the question stays in the project's list and the thread can go on.
-            $kept = $project === null ? null : $this->keepFailedTurn($user, $conversation, $project, $notes === [] ? $text : $text."\n\n".implode(' · ', $notes));
+            $kept = $project === null ? null : $this->keepFailedTurn($user, $conversation, $project, $notes === [] ? $text : $text."\n\n".implode(' · ', $notes), $parentId);
 
             return response()->json([
                 'message' => $exception instanceof AiException ? $exception->userMessage() : $exception->getMessage(),
@@ -431,8 +432,8 @@ class AiChatController extends Controller
             ['text' => $answer, 'proposals' => $proposals] = $this->buildLocalProposals($localRoot, $answer);
         }
 
-        [$conversation, $userMessage, $assistantMessage] = DB::transaction(function () use ($user, $conversation, $text, $stored, $answer, $proposals, $project): array {
-            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'repo' => $project, 'title' => Str::limit(Str::squish($text), AiConversation::TITLE_LENGTH, '…')]);
+        [$conversation, $userMessage, $assistantMessage] = DB::transaction(function () use ($user, $conversation, $text, $stored, $answer, $proposals, $project, $parentId): array {
+            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'parent_id' => $parentId, 'repo' => $project, 'title' => Str::limit(Str::squish($text), AiConversation::TITLE_LENGTH, '…')]);
 
             // * A general chat that turns to a repo joins that project from then on.
             if ($conversation->repo === null && $project !== null) {
@@ -441,6 +442,17 @@ class AiChatController extends Controller
 
             $userMessage = $conversation->messages()->create(['role' => AiMessage::ROLE_USER, 'content' => $stored]);
             $assistantMessage = $conversation->messages()->create(['role' => AiMessage::ROLE_ASSISTANT, 'content' => $answer]);
+
+            // * A new edit of a file replaces the older one still waiting in this chat: both were made against the same file, so approving one would leave the other out of date.
+            if ($proposals !== []) {
+                AiChangeProposal::query()
+                    ->whereIn('ai_message_id', $conversation->messages()->select('id'))
+                    ->where('status', AiChangeProposal::STATUS_PENDING)
+                    ->whereIn('repo', array_unique(array_column($proposals, 'repo')))
+                    ->whereIn('path', array_column($proposals, 'path'))
+                    ->update(['status' => AiChangeProposal::STATUS_REJECTED]);
+            }
+
             $assistantMessage->proposals()->createMany($proposals);
             $conversation->touch();
 
@@ -458,8 +470,8 @@ class AiChatController extends Controller
             $autoPrError = $auto instanceof JsonResponse ? ($auto->getData(true)['message'] ?? GithubException::FAILED) : null;
         }
 
-        // * Edits to a folder of this machine are written right away; a conflict or refusal leaves them pending for the person to review.
-        if ($localRoot !== null && $proposals !== []) {
+        // * Edits to a folder of this machine are written right away (unless the comment box holds them for a tick); a conflict or refusal leaves them pending for the person to review.
+        if ($localRoot !== null && $proposals !== [] && ! $request->boolean('hold_edits')) {
             $this->applyLocalProposals($request, $assistantMessage);
         }
 
@@ -544,16 +556,10 @@ class AiChatController extends Controller
             }
 
             try {
-                // * Check every file first so a conflict writes nothing.
-                foreach ($pending as $proposal) {
-                    if ($this->workspace->currentHash($this->rootOf($proposal), $proposal->path) !== $proposal->base_sha) {
-                        throw new LocalWorkspaceException(LocalWorkspaceException::CONFLICT, 409);
-                    }
-                }
-
                 foreach ($pending as $proposal) {
                     $root = $this->rootOf($proposal);
-                    $hashes = $this->workspace->write($root, $proposal->path, $proposal->content, $proposal->base_sha);
+                    // * The person applies what they see: a file edited since the proposal is overwritten, not refused.
+                    $hashes = $this->workspace->write($root, $proposal->path, $proposal->content, $this->workspace->currentHash($root, $proposal->path));
                     $proposal->update(['status' => AiChangeProposal::STATUS_APPLIED]);
 
                     // * Audit: who wrote which relative path, hashes before/after; never the content.
@@ -573,12 +579,14 @@ class AiChatController extends Controller
     public function revertLocalProposals(Request $request, AiMessage $message): JsonResponse
     {
         $this->assertOwned($request, $message);
+        // * "force": the person confirmed that later edits of the file may go too; the file returns to the text before the AI's edit.
+        $force = $request->boolean('force');
 
         if (($refusal = $this->workspace->refusal($request)) !== null) {
             return response()->json(['message' => $refusal], 422);
         }
 
-        return DB::transaction(function () use ($request, $message): JsonResponse {
+        return DB::transaction(function () use ($request, $message, $force): JsonResponse {
             $applied = $message->proposals()->where('status', AiChangeProposal::STATUS_APPLIED)->where('repo', 'like', self::LOCAL_PREFIX.'%')->lockForUpdate()->get();
 
             if ($applied->isEmpty()) {
@@ -597,8 +605,8 @@ class AiChatController extends Controller
                         throw new LocalWorkspaceException(LocalWorkspaceException::REVERT_UNAVAILABLE, 422);
                     }
 
-                    if ($this->workspace->currentHash($root, $proposal->path) !== LocalWorkspace::hash($proposal->content)) {
-                        throw new LocalWorkspaceException(LocalWorkspaceException::CONFLICT, 409);
+                    if (! $force && $this->workspace->currentHash($root, $proposal->path) !== LocalWorkspace::hash($proposal->content)) {
+                        throw new LocalWorkspaceException(LocalWorkspaceException::REVERT_CONFLICT, 409);
                     }
 
                     $restored[$proposal->id] = $before;
@@ -606,7 +614,7 @@ class AiChatController extends Controller
 
                 foreach ($applied as $proposal) {
                     $root = $this->rootOf($proposal);
-                    $hashes = $this->workspace->write($root, $proposal->path, $restored[$proposal->id], LocalWorkspace::hash($proposal->content));
+                    $hashes = $this->workspace->write($root, $proposal->path, $restored[$proposal->id], $force ? $this->workspace->currentHash($root, $proposal->path) : LocalWorkspace::hash($proposal->content));
                     $proposal->update(['status' => AiChangeProposal::STATUS_REVERTED]);
 
                     activity()->causedBy($request->user())->event('ai-chat.local-revert')
@@ -851,11 +859,19 @@ class AiChatController extends Controller
         return $answered !== null && $picked !== null && (int) $picked !== $answered['account_id'] ? $answered : null;
     }
 
-    /** Saves the person's question (and the thread, when it is new) after the AI failed to answer it. */
-    private function keepFailedTurn(Admin $user, ?AiConversation $conversation, string $project, string $stored): AiConversation
+    /** * Internal id of the chat a new thread is a child session of: only the signed-in admin's own chat counts, and a child is never a parent (one level). */
+    private function parentId(SendAiChatMessageRequest $request, Admin $user): ?int
     {
-        $conversation = DB::transaction(function () use ($user, $conversation, $project, $stored): AiConversation {
-            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'repo' => $project, 'title' => Str::limit(Str::squish($stored), AiConversation::TITLE_LENGTH, '…')]);
+        $uuid = $request->validated('parent_conversation_id');
+
+        return $uuid === null ? null : AiConversation::query()->ownedBy($user)->whereNull('parent_id')->where('uuid', $uuid)->value('id');
+    }
+
+    /** Saves the person's question (and the thread, when it is new) after the AI failed to answer it. */
+    private function keepFailedTurn(Admin $user, ?AiConversation $conversation, string $project, string $stored, ?int $parentId = null): AiConversation
+    {
+        $conversation = DB::transaction(function () use ($user, $conversation, $project, $stored, $parentId): AiConversation {
+            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'parent_id' => $parentId, 'repo' => $project, 'title' => Str::limit(Str::squish($stored), AiConversation::TITLE_LENGTH, '…')]);
 
             if ($conversation->repo === null) {
                 $conversation->update(['repo' => $project]);
@@ -889,6 +905,8 @@ class AiChatController extends Controller
     {
         return $message->proposals->map(fn (AiChangeProposal $proposal): array => [
             'id' => $proposal->id,
+            // * The answer the edit belongs to: the code viewer's tick applies or drops that answer's edits.
+            'message_id' => $proposal->ai_message_id,
             'repo' => $proposal->repo,
             'path' => $proposal->path,
             'action' => $proposal->action,

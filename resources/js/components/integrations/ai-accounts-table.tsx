@@ -41,7 +41,7 @@ const CLI_NAME: Record<string, string> = {
 
 // * A generated name ends with the token type ("OpenAI / Codex · Session token 2"): a CLI account shows as "codex CLI" like "claude CLI", an API one drops the suffix.
 const shortName = (account: AiAccountSummary) => {
-    const generated = / · (?:API token|Session token)(?= \d+$|$)/;
+    const generated = / (?: · API token| · Session token| CLI)(?= \d+$|$)/;
 
     if (!generated.test(account.name)) {
         return account.name;
@@ -192,7 +192,7 @@ export function AiAccountsTable({
             ),
             cell: ({ row }) => (
                 <div
-                    className="whitespace-normal"
+                    className="min-w-64 whitespace-normal"
                     title="Lấy từ lỗi thật của nhà cung cấp, không có số hạn mức còn lại."
                 >
                     <AccountLimit limit={row.original.limit} />

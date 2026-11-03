@@ -208,7 +208,7 @@ class AiAccountController extends Controller
     }
 
     /**
-     * The name of a new account: the one sent, else the provider and token type ("OpenAI / Codex · Session token"), with a numeric suffix when taken.
+     * The name of a new account: the one sent, else the provider and token type ("OpenAI / Codex CLI" for a session token, "Claude · API token" for an API one), with a numeric suffix when taken.
      * ! Built from the form's own choices only: no credential file, token or config is read to find an identity.
      *
      * @param  array<string, mixed>  $validated
@@ -219,7 +219,8 @@ class AiAccountController extends Controller
             return $validated['name'];
         }
 
-        $base = Str::before(AiAccount::VENDORS[$validated['vendor']], ' (').' · '.Str::before(AiAccount::AUTH_TYPES[$validated['auth_type']], ' (');
+        $vendor = Str::before(AiAccount::VENDORS[$validated['vendor']], ' (');
+        $base = $validated['auth_type'] === AiAccount::AUTH_SESSION ? "{$vendor} CLI" : "{$vendor} · ".Str::before(AiAccount::AUTH_TYPES[$validated['auth_type']], ' (');
         $name = $base;
 
         for ($number = 2; AiAccount::query()->where('name', $name)->exists(); $number++) {

@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Http\Requests\ImportLocalProjectRequest;
+use App\Services\Ai\AiAssistant;
+use App\Services\Ai\AiException;
+use App\Services\Ai\GithubException;
 use App\Services\Ai\ImageFiles;
 use App\Services\Ai\LocalWorkspace;
 use App\Services\Ai\LocalWorkspaceException;
@@ -114,20 +117,99 @@ class LocalWorkspaceController extends Controller
         return $this->guarded($request, fn (): array => $this->workspace->run($data['root'], $data['command']));
     }
 
-    /** * Saves the person's own edit of one file: same guards and atomic write as an approved proposal; `original` is the text the editor started from, a different file on disk is a 409. */
+    /** * Saves the person's own edit of one file: same guards and atomic write as an approved proposal; the editor saves by itself, so what the person typed replaces the file even if it changed on disk meanwhile. */
     public function save(Request $request): JsonResponse
     {
         $data = $request->validate([
             'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
             'path' => ['required', 'string', 'max:300'],
             'content' => ['present', 'nullable', 'string'],
-            'original' => ['present', 'nullable', 'string'],
+            'original' => ['nullable', 'string'],
         ]);
 
         return $this->guarded($request, function () use ($data): array {
-            $this->workspace->write($data['root'], $data['path'], $data['content'] ?? '', LocalWorkspace::hash($data['original'] ?? ''));
+            $this->workspace->write($data['root'], $data['path'], $data['content'] ?? '', $this->workspace->currentHash($data['root'], $data['path']));
 
             return ['path' => $data['path']];
+        });
+    }
+
+    /** * "Hoàn tác thay đổi" of the change list: the file goes back to git `HEAD` (a new file is removed). */
+    public function discard(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'path' => ['required', 'string', 'max:300'],
+        ]);
+
+        return $this->guarded($request, function () use ($data, $request): array {
+            $this->workspace->discard($data['root'], $data['path']);
+            activity()->causedBy($request->user())->event('ai-chat.local-discard')->withProperties(['root' => $data['root'], 'path' => $data['path']])->log('Hoàn tác thay đổi một tệp');
+
+            return ['path' => $data['path']];
+        });
+    }
+
+    /**
+     * "Tạo bằng AI" in the commit box: a title and description written from the diff of the listed files.
+     * ! The diff of the change list is sent to the picked AI account, only when the person presses the button; nothing is stored.
+     */
+    public function commitMessage(Request $request, AiAssistant $assistant): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'ai_account_id' => ['nullable', 'integer'],
+            'ai_model' => ['nullable', 'string', 'max:100'],
+        ]);
+
+        return $this->guarded($request, function () use ($data, $assistant): array {
+            try {
+                return $assistant->commitMessage($this->workspace->diffForCommit($data['root']), isset($data['ai_account_id']) ? (int) $data['ai_account_id'] : null, $data['ai_model'] ?? null);
+            } catch (AiException $exception) {
+                throw new LocalWorkspaceException($exception->userMessage(), 422);
+            }
+        });
+    }
+
+    /** * "Commit" of the change list: one local commit of the listed files with the typed message (never a push). */
+    public function commit(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'message' => ['required', 'string', 'max:200'],
+        ]);
+
+        return $this->guarded($request, function () use ($data, $request): array {
+            $result = $this->workspace->commit($data['root'], trim($data['message']));
+            activity()->causedBy($request->user())->event('ai-chat.local-commit')->withProperties(['root' => $data['root'], 'hash' => $result['hash'], 'files' => $result['files']])->log('Commit các thay đổi của một dự án local');
+
+            return $result;
+        });
+    }
+
+    /**
+     * "Pull request": a new branch with the listed files, pushed to origin, and the pull request on GitHub.
+     * ! Leaves the machine (push and GitHub API); only on the person's press, and every run is logged.
+     */
+    public function pullRequest(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'root' => ['required', 'string', 'regex:/^[a-z0-9_-]{1,40}$/'],
+            'title' => ['required', 'string', 'max:200'],
+            'body' => ['nullable', 'string', 'max:5000'],
+            'base' => ['nullable', 'string', 'max:100', 'regex:/^[\w.\/-]+$/'],
+        ]);
+
+        return $this->guarded($request, function () use ($data, $request): array {
+            try {
+                $result = $this->workspace->pullRequest($data['root'], trim($data['title']), trim($data['body'] ?? ''), $data['base'] ?? null);
+            } catch (GithubException $exception) {
+                throw new LocalWorkspaceException($exception->getMessage(), 422);
+            }
+
+            activity()->causedBy($request->user())->event('ai-chat.local-pull-request')->withProperties(['root' => $data['root'], 'branch' => $result['branch'], 'hash' => $result['hash'], 'files' => $result['files']])->log('Push nhánh và tạo Pull request từ một dự án local');
+
+            return $result;
         });
     }
 

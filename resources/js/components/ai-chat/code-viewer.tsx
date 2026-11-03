@@ -2,13 +2,13 @@ import {
     Check,
     ChevronDown,
     ChevronRight,
-    ChevronsDownUp,
     Code2,
     Copy,
     Eye,
-    Save,
     X,
+    Undo2,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
@@ -25,18 +25,34 @@ import {
 import { FileIcon } from '@/components/ai-chat/file-icon';
 import { MarkdownContent } from '@/components/ai-chat/markdown-content';
 import { ResizeHandle } from '@/components/ai-chat/resize-handle';
-import { cachedRequest } from '@/lib/ai-chat-cache';
-import { diffSides, reconstructOriginal } from '@/lib/proposal-original';
+import { cachedRequest, invalidateAiChatCache } from '@/lib/ai-chat-cache';
 import { requestErrorMessage } from '@/lib/ai-error';
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
+import { rememberCopied } from '@/lib/code-reference';
+import {
+    ContextMenu,
+    ContextMenuContent,
+    ContextMenuItem,
+    ContextMenuSeparator,
+    ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import type { AssistantIdentity } from '@/components/ai-chat/assistant-avatar';
+import { AssistantAvatar } from '@/components/ai-chat/assistant-avatar';
+import { QuickOpen } from '@/components/ai-chat/quick-open';
+import { CommitActions } from '@/components/ai-chat/commit-box';
+import { FileContextMenu } from '@/components/ai-chat/file-context-menu';
+import type { FileActions } from '@/components/ai-chat/file-context-menu';
+import type { InlineAnswer } from '@/components/ai-chat/inline-ask';
+import { useConfirm } from '@/hooks/use-confirm';
 import { useResizableWidth } from '@/hooks/use-resizable-width';
-import type { AiChatProposal } from '@/types';
+import type { AiChatActivityStep, AiChatProposal } from '@/types';
 import { Input } from '@/components/ui/input';
 import { LoadingRows } from '@/components/ai-chat/loading-rows';
 import {
     LocalChanges,
     useLocalChanges,
 } from '@/components/ai-chat/local-changes';
+import { firstChangedLine } from '@/lib/proposal-original';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -49,7 +65,7 @@ const CHANGE_BADGES = {
     update: {
         letter: 'M',
         label: 'đã sửa',
-        className: 'text-amber-600 dark:text-amber-400',
+        className: 'text-yellow-600 dark:text-yellow-400',
     },
     create: {
         letter: 'A',
@@ -112,8 +128,11 @@ function TreeItems({
     onToggle,
     selected,
     onSelect,
+    marked,
+    onMark,
     changed,
     changedDirs,
+    actions,
 }: {
     nodes: TreeNode[];
     depth: number;
@@ -121,8 +140,12 @@ function TreeItems({
     onToggle: (path: string) => void;
     selected: string | null;
     onSelect: (path: string) => void;
+    /** * Files picked with Cmd/Ctrl+click (several at once, tagged in the chat). */
+    marked: Set<string>;
+    onMark: (path: string) => void;
     changed: Map<string, AiChatProposal['action']>;
     changedDirs: Set<string>;
+    actions: FileActions;
 }) {
     return (
         <ul role={depth === 0 ? 'tree' : 'group'}>
@@ -135,76 +158,108 @@ function TreeItems({
                         key={node.path}
                         role="treeitem"
                         aria-expanded={isDir ? isOpen : undefined}
-                        aria-selected={node.path === selected}
+                        aria-selected={
+                            node.path === selected || marked.has(node.path)
+                        }
                     >
-                        <button
-                            type="button"
-                            onClick={() =>
-                                isDir
-                                    ? onToggle(node.path)
-                                    : onSelect(node.path)
-                            }
-                            style={{ paddingLeft: `${depth * 12 + 8}px` }}
-                            className={cn(
-                                'flex w-full items-center gap-1.5 rounded-sm py-1 pr-2 text-left text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
-                                node.path === selected &&
-                                    'bg-accent text-accent-foreground',
-                            )}
+                        <FileContextMenu
+                            path={node.path}
+                            actions={actions}
+                            folder={isDir}
+                            items={[
+                                {
+                                    label: isDir
+                                        ? isOpen
+                                            ? 'Thu gọn'
+                                            : 'Mở rộng'
+                                        : 'Mở tệp',
+                                    onSelect: () =>
+                                        isDir
+                                            ? onToggle(node.path)
+                                            : onSelect(node.path),
+                                },
+                            ]}
                         >
-                            {isDir ? (
-                                isOpen ? (
-                                    <ChevronDown
-                                        aria-hidden="true"
-                                        className="size-3.5 shrink-0"
-                                    />
-                                ) : (
-                                    <ChevronRight
-                                        aria-hidden="true"
-                                        className="size-3.5 shrink-0"
-                                    />
-                                )
-                            ) : (
-                                <span className="size-3.5 shrink-0" />
-                            )}
-                            <FileIcon
-                                name={node.name}
-                                dir={isDir}
-                                open={isOpen}
-                            />
-                            <span
+                            <button
+                                type="button"
+                                onClick={(event) =>
+                                    isDir
+                                        ? onToggle(node.path)
+                                        : event.metaKey || event.ctrlKey
+                                          ? onMark(node.path)
+                                          : onSelect(node.path)
+                                }
+                                style={{ paddingLeft: `${depth * 12 + 8}px` }}
                                 className={cn(
-                                    'truncate',
-                                    changed.has(node.path) &&
-                                        CHANGE_BADGES[changed.get(node.path)!]
-                                            .className,
+                                    'flex w-full items-center gap-1.5 rounded-sm py-1 pr-2 text-left text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
+                                    node.path === selected &&
+                                        'bg-accent text-accent-foreground',
+                                    marked.has(node.path) &&
+                                        'bg-primary/15 text-foreground ring-1 ring-primary/40',
                                 )}
                             >
-                                {node.name}
-                            </span>
-                            {isDir && changedDirs.has(node.path) && (
-                                <span
-                                    role="img"
-                                    aria-label="Có tệp đã thay đổi"
-                                    title="Có tệp đã thay đổi"
-                                    className="ml-auto size-1.5 shrink-0 rounded-full bg-amber-500"
+                                {isDir ? (
+                                    isOpen ? (
+                                        <ChevronDown
+                                            aria-hidden="true"
+                                            className="size-3.5 shrink-0"
+                                        />
+                                    ) : (
+                                        <ChevronRight
+                                            aria-hidden="true"
+                                            className="size-3.5 shrink-0"
+                                        />
+                                    )
+                                ) : (
+                                    <span className="size-3.5 shrink-0" />
+                                )}
+                                <FileIcon
+                                    name={node.name}
+                                    dir={isDir}
+                                    open={isOpen}
                                 />
-                            )}
-                            {changed.has(node.path) && (
                                 <span
-                                    title={`Đã thay đổi (${CHANGE_BADGES[changed.get(node.path)!].label})`}
                                     className={cn(
-                                        'ml-auto shrink-0 text-xs font-medium',
-                                        CHANGE_BADGES[changed.get(node.path)!]
-                                            .className,
+                                        'truncate',
+                                        changed.has(node.path) &&
+                                            CHANGE_BADGES[
+                                                changed.get(node.path)!
+                                            ].className,
+                                        // * A folder that holds a changed file is yellow too.
+                                        isDir &&
+                                            changedDirs.has(node.path) &&
+                                            CHANGE_BADGES.update.className,
                                     )}
                                 >
-                                    {
-                                        CHANGE_BADGES[changed.get(node.path)!]
-                                            .letter
-                                    }
+                                    {node.name}
                                 </span>
-                            )}
-                        </button>
+                                {isDir && changedDirs.has(node.path) && (
+                                    <span
+                                        role="img"
+                                        aria-label="Có tệp đã thay đổi"
+                                        title="Có tệp đã thay đổi"
+                                        className="ml-auto size-1.5 shrink-0 rounded-full bg-yellow-500"
+                                    />
+                                )}
+                                {changed.has(node.path) && (
+                                    <span
+                                        title={`Đã thay đổi (${CHANGE_BADGES[changed.get(node.path)!].label})`}
+                                        className={cn(
+                                            'ml-auto shrink-0 text-xs font-medium',
+                                            CHANGE_BADGES[
+                                                changed.get(node.path)!
+                                            ].className,
+                                        )}
+                                    >
+                                        {
+                                            CHANGE_BADGES[
+                                                changed.get(node.path)!
+                                            ].letter
+                                        }
+                                    </span>
+                                )}
+                            </button>
+                        </FileContextMenu>
                         {isDir && isOpen && node.children && (
                             <TreeItems
                                 nodes={node.children}
@@ -213,8 +268,11 @@ function TreeItems({
                                 onToggle={onToggle}
                                 selected={selected}
                                 onSelect={onSelect}
+                                marked={marked}
+                                onMark={onMark}
                                 changed={changed}
                                 changedDirs={changedDirs}
+                                actions={actions}
                             />
                         )}
                     </li>
@@ -225,6 +283,42 @@ function TreeItems({
 }
 
 /** * Read-only code viewer of the selected GitHub repo: file tree on the right, the open file with line numbers on the left. */
+/**
+ * The text while the AI "types" an edit: the untouched head and tail stay as they are, and inside the changed block the new lines replace the old ones one by one (so no file-long red block flashes).
+ */
+function typedLines(before: string, after: string, shown: number): string {
+    const old = before.split('\n');
+    const next = after.split('\n');
+    let head = 0;
+
+    while (
+        head < old.length &&
+        head < next.length &&
+        old[head] === next[head]
+    ) {
+        head++;
+    }
+
+    let tail = 0;
+
+    while (
+        tail < old.length - head &&
+        tail < next.length - head &&
+        old[old.length - 1 - tail] === next[next.length - 1 - tail]
+    ) {
+        tail++;
+    }
+
+    const typed = Math.max(0, shown - head);
+
+    return [
+        ...next.slice(0, head),
+        ...next.slice(head, head + typed),
+        ...old.slice(head + typed, old.length - tail),
+        ...next.slice(next.length - tail),
+    ].join('\n');
+}
+
 export function CodeViewer({
     repo,
     repos,
@@ -234,6 +328,12 @@ export function CodeViewer({
     changes,
     openRequest = null,
     onAsk,
+    onInlineAsk,
+    assistant,
+    onChangesUpdate,
+    aiSelection,
+    onActiveFile,
+    onMarkedFiles,
 }: {
     /** * The project whose files are shown. */
     repo: string;
@@ -255,8 +355,32 @@ export function CodeViewer({
         endLine: number;
         text: string;
     }) => void;
+    /** * "Chat với AI về đoạn này" answers in a comment box under the lines: asks about them and returns the answer (the same conversation continues with `conversation`). */
+    onInlineAsk?: (
+        reference: {
+            path: string;
+            startLine: number;
+            endLine: number;
+            text: string;
+        },
+        question: string,
+        conversation: string | null,
+        signal: AbortSignal,
+        onStep: (step: AiChatActivityStep) => void,
+    ) => Promise<InlineAnswer>;
+    /** * Name and avatar of the assistant, shown on the answers of the comment box. */
+    assistant?: AssistantIdentity;
+    /** * The AI account and model picked in the chat: the commit box's "Tạo bằng AI" asks that one. */
+    aiSelection?: { accountId: number | null; model: string | null };
+    /** * An answer's edits changed state (applied or dropped from the header tick): the page's list of changes follows. */
+    onChangesUpdate?: (proposals: AiChatProposal[]) => void;
+    /** * The file open in the viewer changed (null: none): the chat tags it by itself. */
+    onActiveFile?: (path: string | null) => void;
+    /** * Files picked together with Cmd/Ctrl+click (empty: none): the chat tags all of them. */
+    onMarkedFiles?: (paths: string[]) => void;
 }) {
     const { copied: pathCopied, copy: copyPath } = useCopyToClipboard();
+    // * Either column can be dragged out to the full width: the chat then shrinks away (and clips its content) instead of being pushed off the screen.
     const fileWidth = useResizableWidth(
         'ai-chat.width.file',
         704,
@@ -276,6 +400,16 @@ export function CodeViewer({
     const [filter, setFilter] = useState('');
     const [openDirs, setOpenDirs] = useState<Set<string>>(new Set());
     const [selected, setSelected] = useState<string | null>(null);
+
+    useEffect(() => {
+        onActiveFile?.(selected);
+    }, [selected, onActiveFile]);
+
+    const [marked, setMarked] = useState<Set<string>>(new Set());
+
+    useEffect(() => {
+        onMarkedFiles?.([...marked]);
+    }, [marked, onMarkedFiles]);
     // * Files open as tabs (the active one is `selected`); an unsaved edit of a tab that is not active waits in `drafts`.
     const [tabs, setTabs] = useState<string[]>([]);
     const drafts = useRef(new Map<string, string>());
@@ -284,6 +418,11 @@ export function CodeViewer({
     const [view, setView] = useState<'files' | 'changes'>('files');
     // * The person's unsaved edit of the open local file (null = none).
     const [draft, setDraft] = useState<string | null>(null);
+    // * Where the AI changed the open file: the editor scrolls there (the first changed line of the stored diff).
+    const [revealAt, setRevealAt] = useState<{
+        line: number;
+        id: number;
+    } | null>(null);
     // * The open local file as it is in git HEAD (null: not tracked, or no git): the editor marks the lines that differ.
     const [baseline, setBaseline] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
@@ -296,10 +435,10 @@ export function CodeViewer({
     // * An image file arrives as a data URL and is shown as a picture instead of text.
     const [image, setImage] = useState<string | null>(null);
     // * A markdown file can be read rendered instead of as code (resets when another file opens).
-    const [preview, setPreview] = useState(false);
+    const [preview, setPreview] = useState(true);
     const isMarkdown = /\.(md|markdown)$/i.test(selected ?? '');
 
-    useEffect(() => setPreview(false), [selected]);
+    useEffect(() => setPreview(true), [selected]);
 
     useEffect(() => {
         let cancelled = false;
@@ -515,17 +654,25 @@ export function CodeViewer({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [openRequest, paths, repo]);
 
-    const openFile = async (path: string, discardCurrent = false) => {
-        const change = changed.get(path);
+    const openFile = async (
+        path: string,
+        discardCurrent = false,
+        fresh?: AiChatProposal[],
+    ) => {
+        // * Right after a decision the state still holds the old status: the answer's own list is newer.
+        const latest =
+            fresh?.find((item) => item.repo === repo && item.path === path) ??
+            changed.get(path);
+        // * An edit that was taken back or dropped no longer shows as a change.
+        const change =
+            latest?.status === 'reverted' || latest?.status === 'rejected'
+                ? undefined
+                : latest;
 
         // * A local edit that is applied is already in the file: show the file itself, not a diff against itself.
         const applied = localRoot !== null && change?.status === 'applied';
 
         loadedStatus.current = change?.status;
-
-        if (!discardCurrent && selected !== null && draft !== null) {
-            drafts.current.set(selected, draft);
-        }
 
         setTabs((current) =>
             current.includes(path) ? current : [...current, path],
@@ -533,6 +680,7 @@ export function CodeViewer({
         setView('files');
         setSelected(path);
         setContent(null);
+        setRevealAt(null);
         setDraft(null);
         setBaseline(null);
         setSaveError(null);
@@ -579,6 +727,16 @@ export function CodeViewer({
             setImage(file.image ?? null);
             setContent(file.content ?? '');
 
+            // * An edit the AI just wrote: the editor scrolls to where it changed the file.
+            const changedAt =
+                applied && change?.diff
+                    ? firstChangedLine(file.content ?? '', change.diff)
+                    : null;
+
+            setRevealAt(
+                changedAt === null ? null : { line: changedAt, id: Date.now() },
+            );
+
             const unsaved = drafts.current.get(path);
 
             if (unsaved !== undefined && unsaved !== file.content) {
@@ -594,22 +752,6 @@ export function CodeViewer({
                         setBaseline(data.tracked ? data.content : null),
                     )
                     .catch(() => setBaseline(null));
-            }
-
-            // * An applied local edit shows what changed: the file now against the file as it was (rebuilt from the stored diff).
-            if (applied && change?.diff && file.content !== undefined) {
-                const before = reconstructOriginal(file.content, change.diff);
-
-                if (before !== null) {
-                    setBase(before);
-                    setProposed(file.content);
-                } else {
-                    // * The file changed since the edit: show the stored change on its own.
-                    const sides = diffSides(change.diff);
-
-                    setBase(sides.before);
-                    setProposed(sides.after);
-                }
             }
         } catch (caught) {
             setFileError(errorText(caught, 'Không mở được tệp.'));
@@ -630,22 +772,95 @@ export function CodeViewer({
         setSaving(true);
         setSaveError(null);
 
+        const written = draft;
+
         try {
             await api.put('/ai-chat/local/file', {
                 root: localRoot,
                 path: selected,
-                content: draft,
+                content: written,
                 original: content,
             });
-            setContent(draft);
-            setDraft(null);
-            drafts.current.delete(selected);
+            setContent(written);
+            // * Typing went on during the request: that newer text stays a draft and is saved next.
+            setDraft((current) => (current === written ? null : current));
+            if (draftRef.current === written) {
+                drafts.current.delete(selected);
+            }
         } catch (caught) {
             setSaveError(errorText(caught, 'Không lưu được tệp.'));
         } finally {
             setSaving(false);
         }
     };
+
+    // * Cmd/Ctrl+S anywhere in the page (not only inside the editor): applies the AI's edit when one is waiting, else saves now; the browser's own "save page" never opens.
+    const shortcut = useRef<() => void>(() => undefined);
+
+    shortcut.current = () =>
+        void (pendingEdit !== undefined ? decideEdit('apply') : save());
+
+    useEffect(() => {
+        if (selected === null) {
+            return;
+        }
+
+        const onKey = (event: KeyboardEvent) => {
+            if (
+                (event.metaKey || event.ctrlKey) &&
+                event.key.toLowerCase() === 's'
+            ) {
+                event.preventDefault();
+                shortcut.current();
+            }
+        };
+
+        window.addEventListener('keydown', onKey);
+
+        return () => window.removeEventListener('keydown', onKey);
+    }, [selected]);
+
+    // * Writes the typed text of a file that is being left (another file opens, its tab closes). False when it could not be written.
+    const persist = async (path: string, text: string | undefined) => {
+        if (localRoot === null || text === undefined) {
+            return true;
+        }
+
+        try {
+            await api.put('/ai-chat/local/file', {
+                root: localRoot,
+                path,
+                content: text,
+            });
+
+            if (drafts.current.get(path) === text || path !== selected) {
+                drafts.current.delete(path);
+            }
+
+            return true;
+        } catch (caught) {
+            toast.error(errorText(caught, `Không lưu được ${path}.`));
+
+            return false;
+        }
+    };
+    const draftOf = (path: string) =>
+        path === selected ? (draft ?? undefined) : drafts.current.get(path);
+
+    // * No save button: an edit is written to the file shortly after typing stops.
+    const autoSave = useRef(save);
+
+    autoSave.current = save;
+
+    useEffect(() => {
+        if (draft === null || saving) {
+            return;
+        }
+
+        const timer = window.setTimeout(() => void autoSave.current(), 800);
+
+        return () => window.clearTimeout(timer);
+    }, [draft, saving]);
 
     // * Only a plain local text file can be edited; GitHub files and AI proposals stay read-only.
     const editable = localRoot !== null && proposed === null && image === null;
@@ -655,12 +870,18 @@ export function CodeViewer({
     const isDirty = (path: string) =>
         path === selected ? draft !== null : drafts.current.has(path);
 
-    const closeTab = (path: string) => {
+    const { confirm, dialog: confirmDialog } = useConfirm();
+
+    const closeTab = async (path: string) => {
+        // * Closing the tab saves what was typed; only a failed write asks whether to drop it.
         if (
             isDirty(path) &&
-            !window.confirm(
-                `${path.split('/').pop()} chưa lưu. Đóng và bỏ thay đổi?`,
-            )
+            !(await persist(path, draftOf(path))) &&
+            !(await confirm({
+                title: 'Đóng tệp chưa lưu',
+                description: `${path.split('/').pop()} chưa lưu được. Đóng và bỏ thay đổi?`,
+                action: 'Đóng và bỏ',
+            }))
         ) {
             return;
         }
@@ -685,6 +906,219 @@ export function CodeViewer({
         }
     };
 
+    // * The right-click menu of every file row (tree and change list) and of the open-file tabs shares these.
+    // * The AI's pending edit of the open file (a local project): the tick in the header writes it, the cross drops it.
+    const pendingEdit =
+        localRoot !== null && proposed !== null && selected !== null
+            ? changes.find(
+                  (change) =>
+                      change.repo === repo &&
+                      change.path === selected &&
+                      change.status === 'pending' &&
+                      change.message_id !== undefined,
+              )
+            : undefined;
+    // * An edit already written to the file: the same arrow takes it back (revert-local).
+    const appliedEdit =
+        localRoot !== null && selected !== null
+            ? changes.find(
+                  (change) =>
+                      change.repo === repo &&
+                      change.path === selected &&
+                      change.status === 'applied' &&
+                      change.message_id !== undefined,
+              )
+            : undefined;
+    const boxHost = useRef<HTMLDivElement>(null);
+    // * Takes every comment box away (the edit was decided, or another file opens).
+    const closeBoxes = () =>
+        boxHost.current?.dispatchEvent(new Event('pm-close-boxes'));
+    // * A new edit of the AI is "typed" into the diff: its lines show up one burst after another (null: all shown).
+    const [revealed, setRevealed] = useState<number | null>(null);
+    const pendingId = pendingEdit?.id;
+
+    useEffect(() => {
+        const total =
+            proposed === null
+                ? 0
+                : Math.max(
+                      proposed.split('\n').length,
+                      (base ?? content ?? '').split('\n').length,
+                  );
+
+        if (
+            pendingId === undefined ||
+            total < 2 ||
+            window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        ) {
+            setRevealed(null);
+
+            return;
+        }
+
+        // * Starts at the first changed line: the untouched head of the file is not "typed".
+        const old = (base ?? content ?? '').split('\n');
+        const next = (proposed ?? '').split('\n');
+        let shown = 0;
+
+        while (
+            shown < old.length &&
+            shown < next.length &&
+            old[shown] === next[shown]
+        ) {
+            shown++;
+        }
+
+        setRevealed(shown);
+
+        // * Frame-driven and time-based (about 25 lines a second, 0.8 to 3 s in all): each frame shows the lines due by now, so the typing flows instead of stepping on a timer.
+        const first = shown;
+        const duration = Math.min(3000, Math.max(800, (total - first) * 40));
+        const started = performance.now();
+        let frame = 0;
+        let last = first;
+
+        const tick = (now: number) => {
+            const due =
+                first +
+                Math.floor(((now - started) / duration) * (total - first));
+
+            if (due >= total) {
+                setRevealed(null);
+
+                return;
+            }
+
+            // * Only a line that is new re-renders the diff.
+            if (due !== last) {
+                last = due;
+                setRevealed(due);
+            }
+
+            frame = requestAnimationFrame(tick);
+        };
+
+        frame = requestAnimationFrame(tick);
+
+        return () => cancelAnimationFrame(frame);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pendingId, proposed === null]);
+    const [deciding, setDeciding] = useState(false);
+    const decideEdit = async (kind: 'apply' | 'reject' | 'revert') => {
+        const target = pendingEdit ?? appliedEdit;
+
+        if (target?.message_id === undefined) {
+            return;
+        }
+
+        setDeciding(true);
+
+        try {
+            const { data } = await api.post<{ proposals: AiChatProposal[] }>(
+                `/ai-chat/messages/${target.message_id}/proposals/${
+                    {
+                        apply: 'apply-local',
+                        reject: 'reject',
+                        revert: 'revert-local?force=1',
+                    }[kind]
+                }`,
+            );
+
+            invalidateAiChatCache(`file.${repo}.`);
+            onChangesUpdate?.(data.proposals);
+            closeBoxes();
+
+            // * Reopen the file: the written version (or, once dropped, the one on disk).
+            if (selected !== null) {
+                void openFile(selected, true, data.proposals);
+            }
+        } catch (caught) {
+            toast.error(
+                requestErrorMessage(caught, 'Không xử lý được thay đổi này.'),
+            );
+        } finally {
+            setDeciding(false);
+        }
+    };
+
+    // * Cmd/Ctrl+P: find a file by name (while this viewer is on screen).
+    const [quickOpen, setQuickOpen] = useState(false);
+
+    useEffect(() => {
+        const onKey = (event: globalThis.KeyboardEvent) => {
+            if (
+                (event.metaKey || event.ctrlKey) &&
+                !event.shiftKey &&
+                !event.altKey &&
+                event.key.toLowerCase() === 'p'
+            ) {
+                event.preventDefault();
+                setQuickOpen(true);
+            }
+        };
+
+        window.addEventListener('keydown', onKey);
+
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
+
+    // * Set by the editor: asks about its selection (the whole file when nothing is selected).
+    const askTrigger = useRef<(() => void) | null>(null);
+    const fileActions: FileActions = {
+        copy: (path) => {
+            // * Pasted into the chat, the path becomes a file tag, like the copy button next to the breadcrumb.
+            rememberCopied({ path, startLine: 0, endLine: 0, text: path });
+            void copyPath(path);
+        },
+        ask: onAsk
+            ? (path) => onAsk({ path, startLine: 0, endLine: 0, text: path })
+            : undefined,
+    };
+
+    // * Several tabs at once (the tab menu): one confirmation if any has unsaved edits; the open file moves to the nearest tab left.
+    const closeTabs = async (paths: string[]) => {
+        const gone = new Set(paths);
+        // * Each unsaved tab is written first; only the ones that fail ask whether to drop them.
+        const results = await Promise.all(
+            paths
+                .filter(isDirty)
+                .map(
+                    async (path) =>
+                        [path, await persist(path, draftOf(path))] as const,
+                ),
+        );
+        const unsaved = results.filter(([, saved]) => !saved);
+
+        if (
+            unsaved.length > 0 &&
+            !(await confirm({
+                title: 'Đóng tệp chưa lưu',
+                description: `${unsaved.length} tệp chưa lưu được. Đóng và bỏ thay đổi?`,
+                action: 'Đóng và bỏ',
+            }))
+        ) {
+            return;
+        }
+
+        paths.forEach((path) => drafts.current.delete(path));
+        const rest = tabs.filter((item) => !gone.has(item));
+
+        setTabs(rest);
+
+        if (selected === null || !gone.has(selected)) {
+            return;
+        }
+
+        const next = rest[Math.min(tabs.indexOf(selected), rest.length - 1)];
+
+        if (next === undefined) {
+            setSelected(null);
+            setDraft(null);
+        } else {
+            void openFile(next, true);
+        }
+    };
+
     const toggleDir = (path: string) =>
         setOpenDirs((current) => {
             const next = new Set(current);
@@ -698,6 +1132,16 @@ export function CodeViewer({
 
     return (
         <>
+            {confirmDialog}
+            <QuickOpen
+                open={quickOpen}
+                onOpenChange={setQuickOpen}
+                paths={paths ?? []}
+                onPick={(path) => {
+                    setMarked(new Set());
+                    void openFile(path);
+                }}
+            />
             {/* * Open file: its own column between the chat and the tree. */}
             {showChanges && (
                 <section
@@ -709,13 +1153,24 @@ export function CodeViewer({
                         label="Đổi độ rộng khung thay đổi"
                         {...fileWidth.handleProps}
                     />
-                    <div className="flex h-12 items-center border-b px-3 text-sm font-medium">
+                    <div className="flex h-12 items-center gap-2 border-b px-3 text-sm font-medium">
                         Thay đổi
+                        <CommitActions
+                            root={localRoot}
+                            disabled={
+                                !localChanges.git ||
+                                (localChanges.files ?? []).length === 0
+                            }
+                            accountId={aiSelection?.accountId ?? null}
+                            model={aiSelection?.model ?? null}
+                            onCommitted={localChanges.refresh}
+                        />
                     </div>
                     <LocalChanges
                         root={localRoot}
                         list={localChanges}
                         onOpenFile={(path) => void openFile(path)}
+                        actions={fileActions}
                     />
                 </section>
             )}
@@ -732,59 +1187,121 @@ export function CodeViewer({
                     <div
                         role="tablist"
                         aria-label="Tệp đang mở"
-                        className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b px-2"
+                        className="flex h-12 shrink-0 items-center gap-1 overflow-x-auto border-b px-2"
                     >
                         {tabs.map((path) => {
                             const name = path.split('/').pop() ?? path;
                             const active = path === selected;
 
                             return (
-                                <div
-                                    key={path}
-                                    className={cn(
-                                        'group flex h-8 max-w-48 shrink-0 items-center gap-1.5 rounded-lg pr-1 pl-2 text-sm transition-colors duration-150 motion-reduce:transition-none',
-                                        active
-                                            ? 'bg-muted text-foreground'
-                                            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
-                                    )}
-                                >
-                                    <button
-                                        type="button"
-                                        role="tab"
-                                        aria-selected={active}
-                                        title={path}
-                                        onClick={() =>
-                                            active
-                                                ? undefined
-                                                : void openFile(path)
-                                        }
-                                        className="flex min-w-0 items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                                    >
-                                        <FileIcon
-                                            name={name}
-                                            className="size-4 shrink-0"
-                                        />
-                                        <span className="truncate">{name}</span>
-                                        {isDirty(path) && (
-                                            <span
-                                                role="img"
-                                                aria-label="Chưa lưu"
-                                                className="size-1.5 shrink-0 rounded-full bg-foreground/60"
-                                            />
-                                        )}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        aria-label={`Đóng ${name}`}
-                                        onClick={() => closeTab(path)}
-                                        className="rounded-sm p-0.5 text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                                    >
-                                        <X
-                                            aria-hidden="true"
-                                            className="size-3.5"
-                                        />
-                                    </button>
-                                </div>
+                                <ContextMenu key={path}>
+                                    <ContextMenuTrigger asChild>
+                                        <div
+                                            className={cn(
+                                                'group flex h-8 max-w-48 shrink-0 items-center gap-1.5 rounded-lg pr-1 pl-2 text-sm transition-colors duration-150 motion-reduce:transition-none',
+                                                active
+                                                    ? 'bg-muted text-foreground'
+                                                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                                            )}
+                                        >
+                                            <button
+                                                type="button"
+                                                role="tab"
+                                                aria-selected={active}
+                                                title={path}
+                                                onClick={() =>
+                                                    active
+                                                        ? undefined
+                                                        : void openFile(path)
+                                                }
+                                                className="flex min-w-0 items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                            >
+                                                <FileIcon
+                                                    name={name}
+                                                    className="size-4 shrink-0"
+                                                />
+                                                <span className="truncate">
+                                                    {name}
+                                                </span>
+                                                {isDirty(path) && (
+                                                    <span
+                                                        role="img"
+                                                        aria-label="Chưa lưu"
+                                                        className="size-1.5 shrink-0 rounded-full bg-foreground/60"
+                                                    />
+                                                )}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                aria-label={`Đóng ${name}`}
+                                                onClick={() => closeTab(path)}
+                                                className="rounded-sm p-0.5 text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                            >
+                                                <X
+                                                    aria-hidden="true"
+                                                    className="size-3.5"
+                                                />
+                                            </button>
+                                        </div>
+                                    </ContextMenuTrigger>
+                                    <ContextMenuContent className="w-60">
+                                        <ContextMenuItem
+                                            onSelect={() => closeTab(path)}
+                                        >
+                                            Đóng
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                            disabled={tabs.length < 2}
+                                            onSelect={() =>
+                                                closeTabs(
+                                                    tabs.filter(
+                                                        (item) => item !== path,
+                                                    ),
+                                                )
+                                            }
+                                        >
+                                            Đóng các tab khác
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                            disabled={
+                                                tabs.indexOf(path) ===
+                                                tabs.length - 1
+                                            }
+                                            onSelect={() =>
+                                                closeTabs(
+                                                    tabs.slice(
+                                                        tabs.indexOf(path) + 1,
+                                                    ),
+                                                )
+                                            }
+                                        >
+                                            Đóng các tab bên phải
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                            onSelect={() => closeTabs(tabs)}
+                                        >
+                                            Đóng tất cả
+                                        </ContextMenuItem>
+                                        <ContextMenuSeparator />
+                                        <ContextMenuItem
+                                            onSelect={() =>
+                                                fileActions.copy(path)
+                                            }
+                                        >
+                                            Sao chép đường dẫn
+                                        </ContextMenuItem>
+                                        <ContextMenuItem
+                                            disabled={
+                                                fileActions.ask === undefined
+                                            }
+                                            onSelect={() =>
+                                                fileActions.ask?.(path)
+                                            }
+                                        >
+                                            Thêm tệp vào chat
+                                        </ContextMenuItem>
+                                    </ContextMenuContent>
+                                </ContextMenu>
                             );
                         })}
                     </div>
@@ -826,27 +1343,88 @@ export function CodeViewer({
                                         </TabsList>
                                     </Tabs>
                                 )}
-                            {draft !== null && (
+                            {pendingEdit !== undefined && (
+                                <>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        aria-label="Áp dụng thay đổi của AI"
+                                        title="Áp dụng thay đổi của AI vào tệp (Cmd/Ctrl+S)"
+                                        disabled={deciding}
+                                        onClick={() => void decideEdit('apply')}
+                                        className="h-7 gap-1 px-2 text-xs text-green-600 dark:text-green-400"
+                                    >
+                                        <Check aria-hidden="true" />
+                                        Áp dụng
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        aria-label="Bỏ thay đổi của AI"
+                                        title="Bỏ thay đổi của AI"
+                                        disabled={deciding}
+                                        onClick={() =>
+                                            void decideEdit('reject')
+                                        }
+                                        className="h-7 gap-1 px-2 text-xs text-muted-foreground"
+                                    >
+                                        <Undo2 aria-hidden="true" />
+                                        Bỏ
+                                    </Button>
+                                </>
+                            )}
+                            {appliedEdit !== undefined && (
                                 <Button
                                     type="button"
                                     variant="ghost"
-                                    size="sm"
-                                    disabled={saving}
-                                    onClick={() => void save()}
-                                    title="Lưu (Cmd/Ctrl+S)"
-                                    className="h-7 gap-1 px-2 text-xs"
+                                    size="icon"
+                                    aria-label="Hoàn tác thay đổi của AI"
+                                    title="Hoàn tác thay đổi của AI"
+                                    disabled={deciding}
+                                    onClick={() => void decideEdit('revert')}
+                                    className="size-7 text-muted-foreground"
                                 >
-                                    <Save aria-hidden="true" />
-                                    {saving ? 'Đang lưu...' : 'Lưu'}
+                                    <Undo2 aria-hidden="true" />
                                 </Button>
                             )}
+                            {onInlineAsk &&
+                                content !== null &&
+                                proposed === null &&
+                                image === null &&
+                                !(preview && isMarkdown) && (
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        aria-label="Hỏi AI về đoạn đang chọn hoặc cả tệp"
+                                        title="Hỏi AI về đoạn đang chọn (không chọn: cả tệp) · ⌘L"
+                                        onClick={() => askTrigger.current?.()}
+                                        className="size-7"
+                                    >
+                                        <AssistantAvatar
+                                            {...(assistant ?? {})}
+                                            className="size-5"
+                                        />
+                                    </Button>
+                                )}
                             <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon"
                                 aria-label="Sao chép đường dẫn tệp"
                                 title="Sao chép đường dẫn tệp"
-                                onClick={() => copyPath(selected)}
+                                onClick={() => {
+                                    // * Pasted into the chat, the path becomes a file tag, like copied lines do.
+                                    rememberCopied({
+                                        path: selected,
+                                        startLine: 0,
+                                        endLine: 0,
+                                        text: selected,
+                                    });
+                                    void copyPath(selected);
+                                }}
                                 className="size-7"
                             >
                                 {pathCopied ? (
@@ -875,72 +1453,134 @@ export function CodeViewer({
                             {saveError}
                         </p>
                     )}
-                    {fileError !== null ? (
-                        <p
-                            role="alert"
-                            className="m-4 text-sm text-destructive"
-                        >
-                            {fileError}
-                        </p>
-                    ) : content === null ? (
-                        <LoadingRows rows={8} className="px-4 py-4" />
-                    ) : image !== null ? (
-                        <div className="flex min-h-0 flex-1 items-start justify-center overflow-auto p-4">
-                            <img
-                                src={image}
-                                alt={selected}
-                                className="h-auto max-w-full rounded-md border bg-[repeating-conic-gradient(var(--muted)_0%_25%,transparent_0%_50%)] bg-[length:16px_16px]"
-                            />
-                        </div>
-                    ) : preview && isMarkdown && proposed === null ? (
-                        <div className="min-h-0 flex-1 overflow-auto p-4">
-                            <MarkdownContent content={content} />
-                        </div>
-                    ) : (
-                        <div className="min-h-0 flex-1">
-                            <Suspense
-                                fallback={
-                                    <p className="m-4 text-sm text-muted-foreground">
-                                        Đang tải...
-                                    </p>
-                                }
+                    {/* * The comment boxes float in this layer: it stays put while the file reloads, so a box survives the diff opening. */}
+                    <div
+                        ref={boxHost}
+                        className="relative flex min-h-0 flex-1 flex-col"
+                    >
+                        {fileError !== null ? (
+                            <p
+                                role="alert"
+                                className="m-4 text-sm text-destructive"
                             >
-                                {proposed !== null ? (
-                                    <MonacoDiff
-                                        path={selected}
-                                        original={base ?? content}
-                                        modified={proposed}
-                                    />
-                                ) : (
-                                    <MonacoCode
-                                        path={selected}
-                                        value={draft ?? content}
-                                        onChange={
-                                            editable
-                                                ? (next) =>
-                                                      setDraft(
-                                                          next === content
-                                                              ? null
-                                                              : next,
-                                                      )
-                                                : undefined
-                                        }
-                                        onSave={() => void save()}
-                                        baseline={baseline}
-                                        onAsk={
-                                            onAsk
-                                                ? (range) =>
-                                                      onAsk({
-                                                          path: selected,
-                                                          ...range,
-                                                      })
-                                                : undefined
-                                        }
-                                    />
-                                )}
-                            </Suspense>
-                        </div>
-                    )}
+                                {fileError}
+                            </p>
+                        ) : content === null ? (
+                            <LoadingRows rows={8} className="px-4 py-4" />
+                        ) : image !== null ? (
+                            <div className="flex min-h-0 flex-1 items-start justify-center overflow-auto p-4">
+                                <img
+                                    src={image}
+                                    alt={selected}
+                                    className="h-auto max-w-full rounded-md border bg-[repeating-conic-gradient(var(--muted)_0%_25%,transparent_0%_50%)] bg-[length:16px_16px]"
+                                />
+                            </div>
+                        ) : preview && isMarkdown && proposed === null ? (
+                            <div
+                                className="min-h-0 flex-1 overflow-auto p-4"
+                                // * Editing happens in the code view (the rendered text cannot be written back to markdown without rewriting the file): a double click on the text opens it.
+                                onDoubleClick={() =>
+                                    editable && setPreview(false)
+                                }
+                                title={editable ? 'Bấm đúp để sửa' : undefined}
+                            >
+                                <MarkdownContent content={content} />
+                            </div>
+                        ) : (
+                            <div className="relative min-h-0 flex-1">
+                                <Suspense
+                                    fallback={
+                                        <p className="m-4 text-sm text-muted-foreground">
+                                            Đang tải...
+                                        </p>
+                                    }
+                                >
+                                    {proposed !== null && (
+                                        <div className="absolute inset-0 z-10 bg-background">
+                                            <MonacoDiff
+                                                path={selected}
+                                                typingLine={revealed}
+                                                original={base ?? content}
+                                                modified={
+                                                    revealed === null
+                                                        ? proposed
+                                                        : typedLines(
+                                                              base ?? content,
+                                                              proposed,
+                                                              revealed,
+                                                          )
+                                                }
+                                            />
+                                        </div>
+                                    )}
+                                    {/* * The editor stays mounted under a diff so the comment boxes opened in it keep showing. */}
+                                    <div
+                                        className={cn(
+                                            'absolute inset-0',
+                                            proposed !== null && 'invisible',
+                                        )}
+                                    >
+                                        <MonacoCode
+                                            boxHost={boxHost}
+                                            revealLine={revealAt}
+                                            path={selected}
+                                            value={draft ?? content}
+                                            onChange={
+                                                editable
+                                                    ? (next) =>
+                                                          setDraft(
+                                                              next === content
+                                                                  ? null
+                                                                  : next,
+                                                          )
+                                                    : undefined
+                                            }
+                                            // * Ctrl/Cmd+S: applies the AI's edit when one is waiting, else saves the typed text now.
+                                            onSave={() =>
+                                                void (pendingEdit !==
+                                                    undefined &&
+                                                revealed === null
+                                                    ? decideEdit('apply')
+                                                    : save())
+                                            }
+                                            baseline={baseline}
+                                            assistant={assistant}
+                                            askTrigger={askTrigger}
+                                            onInlineAsk={
+                                                onInlineAsk
+                                                    ? (range, ...rest) =>
+                                                          onInlineAsk(
+                                                              {
+                                                                  path: selected,
+                                                                  ...range,
+                                                              },
+                                                              ...rest,
+                                                          )
+                                                    : undefined
+                                            }
+                                            onAsk={
+                                                onAsk
+                                                    ? (range) => {
+                                                          // * The chat may be squeezed out by a wide file: give it its 22rem back before it takes the snippet.
+                                                          fileWidth.shrinkTo(
+                                                              window.innerWidth -
+                                                                  352 -
+                                                                  96 -
+                                                                  treeWidth.width,
+                                                          );
+                                                          onAsk({
+                                                              path: selected,
+                                                              ...range,
+                                                          });
+                                                      }
+                                                    : undefined
+                                            }
+                                        />
+                                    </div>
+                                </Suspense>
+                            </div>
+                        )}
+                    </div>
                 </section>
             )}
             {/* * File tree: the far-right column, like an editor's explorer. */}
@@ -997,18 +1637,6 @@ export function CodeViewer({
                     )}
                     <span className="ml-auto flex shrink-0 items-center gap-0.5">
                         {headerActions}
-                        <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            aria-label="Thu gọn tất cả thư mục"
-                            title="Thu gọn tất cả thư mục"
-                            disabled={openDirs.size === 0}
-                            onClick={() => setOpenDirs(new Set())}
-                            className="size-8 shrink-0 text-muted-foreground"
-                        >
-                            <ChevronsDownUp aria-hidden="true" />
-                        </Button>
                     </span>
                 </header>
                 {localRoot !== null && (
@@ -1061,9 +1689,33 @@ export function CodeViewer({
                                 openDirs={effectiveOpen}
                                 onToggle={toggleDir}
                                 selected={selected}
-                                onSelect={(path) => void openFile(path)}
+                                onSelect={(path) => {
+                                    setMarked(new Set());
+                                    void openFile(path);
+                                }}
+                                marked={marked}
+                                onMark={(path) =>
+                                    setMarked((current) => {
+                                        const next = new Set(current);
+
+                                        // * The open file joins the first Cmd/Ctrl+click, so a selection starts from what is on screen.
+                                        if (
+                                            current.size === 0 &&
+                                            selected !== null
+                                        ) {
+                                            next.add(selected);
+                                        }
+
+                                        if (!next.delete(path)) {
+                                            next.add(path);
+                                        }
+
+                                        return next;
+                                    })
+                                }
                                 changed={changedActions}
                                 changedDirs={changedDirs}
+                                actions={fileActions}
                             />
                         )}
                     </div>

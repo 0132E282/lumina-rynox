@@ -12,8 +12,11 @@ use RuntimeException;
  */
 final class AiException extends RuntimeException
 {
-    /** @param QuotaLimit|null $limit for a quota stop only: the kind of limit and reset time the error stated (no text) */
-    public function __construct(string $message, public readonly ?QuotaLimit $limit = null)
+    /**
+     * @param  QuotaLimit|null  $limit  for a quota stop only: the kind of limit and reset time the error stated (no text)
+     * @param  string|null  $detail  where it stopped, in our own words (the way of calling, the time limit, the exit code): never text taken from the vendor's reply
+     */
+    public function __construct(string $message, public readonly ?QuotaLimit $limit = null, public readonly ?string $detail = null)
     {
         parent::__construct($message);
     }
@@ -46,8 +49,9 @@ final class AiException extends RuntimeException
     public function userMessage(): string
     {
         $resetAt = $this->getMessage() === self::QUOTA ? $this->limit?->resetAt : null;
+        $text = $resetAt === null ? $this->getMessage() : $this->getMessage().' Thời gian reset: '.$resetAt->format('H:i d/m/Y').'.';
 
-        return $resetAt === null ? $this->getMessage() : $this->getMessage().' Thời gian reset: '.$resetAt->format('H:i d/m/Y').'.';
+        return $this->detail === null ? $text : $text.' ('.$this->detail.')';
     }
 
     /** A short class of the failure for the usage log: derived from the fixed text, so nothing of the vendor's own error is kept. */

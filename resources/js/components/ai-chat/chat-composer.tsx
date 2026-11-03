@@ -31,7 +31,8 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
     referenceLabel,
-    referenceLines,
+    referenceTitle,
+    referenceToken,
     takeCopied,
 } from '@/lib/code-reference';
 import type { CodeReference } from '@/lib/code-reference';
@@ -308,7 +309,9 @@ export function ChatComposer({
         : '';
 
     // * A message may be only tags (picked code) without typed text.
-    const empty = value.trim() === '' && references.length === 0;
+    const empty =
+        value.trim() === '' &&
+        references.every((reference) => reference.auto === true);
     const { auto: autoRead } = useSpeech();
     // * Voice dictation: each phrase is added to the end of the message.
     const valueRef = useRef(value);
@@ -747,40 +750,47 @@ export function ChatComposer({
                         ))}
                     </ul>
                 )}
-                {references.length > 0 && (
+                {references.some(
+                    (reference) => reference.token === undefined,
+                ) && (
                     <ul
                         aria-label="Đoạn code đã chọn"
                         className="flex flex-wrap gap-1.5 px-1"
                     >
-                        {references.map((reference, index) => (
-                            <li
-                                key={`${reference.path}:${reference.startLine}-${reference.endLine}-${index}`}
-                                title={`${reference.path}:${referenceLines(reference)}`}
-                                className="flex max-w-60 items-center gap-1 rounded-md border bg-muted py-0.5 pr-1 pl-1.5 text-xs"
-                            >
-                                <FileCode
-                                    aria-hidden="true"
-                                    className="size-3.5 shrink-0 text-muted-foreground"
-                                />
-                                <span className="truncate font-medium">
-                                    {referenceLabel(reference)}
-                                </span>
-                                <button
-                                    type="button"
-                                    aria-label={`Bỏ ${referenceLabel(reference)}`}
-                                    onClick={() =>
-                                        onReferencesChange?.(
-                                            references.filter(
-                                                (_, i) => i !== index,
-                                            ),
-                                        )
-                                    }
-                                    className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                        {references.map((reference, index) =>
+                            reference.token !== undefined ? null : (
+                                <li
+                                    key={`${reference.path}:${reference.startLine}-${reference.endLine}-${index}`}
+                                    title={referenceTitle(reference)}
+                                    className="flex max-w-60 items-center gap-1 rounded-md border bg-muted py-0.5 pr-1 pl-1.5 text-xs"
                                 >
-                                    <X aria-hidden="true" className="size-3" />
-                                </button>
-                            </li>
-                        ))}
+                                    <FileCode
+                                        aria-hidden="true"
+                                        className="size-3.5 shrink-0 text-muted-foreground"
+                                    />
+                                    <span className="truncate font-medium">
+                                        {referenceLabel(reference)}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        aria-label={`Bỏ ${referenceLabel(reference)}`}
+                                        onClick={() =>
+                                            onReferencesChange?.(
+                                                references.filter(
+                                                    (_, i) => i !== index,
+                                                ),
+                                            )
+                                        }
+                                        className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                                    >
+                                        <X
+                                            aria-hidden="true"
+                                            className="size-3"
+                                        />
+                                    </button>
+                                </li>
+                            ),
+                        )}
                     </ul>
                 )}
                 <textarea
@@ -817,7 +827,26 @@ export function ChatComposer({
 
                         if (reference !== null && onReferencesChange) {
                             event.preventDefault();
-                            onReferencesChange([...references, reference]);
+
+                            // * The tag goes where the cursor is, inside the text, and is swapped for the file or code when the message is sent.
+                            const field = event.currentTarget;
+                            const start = field.selectionStart;
+                            const token = referenceToken(
+                                reference,
+                                references.map((item) => item.token),
+                            );
+
+                            onChange(
+                                `${value.slice(0, start)}${token}${value.slice(field.selectionEnd)}`,
+                            );
+                            onReferencesChange([
+                                ...references,
+                                { ...reference, token },
+                            ]);
+                            window.requestAnimationFrame(() => {
+                                field.selectionStart = field.selectionEnd =
+                                    start + token.length;
+                            });
                         }
                     }}
                     value={value}

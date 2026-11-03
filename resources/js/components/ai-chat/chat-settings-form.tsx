@@ -2,9 +2,11 @@ import { isAxiosError } from 'axios';
 import {
     Bot,
     Plug,
+    ScrollText,
     SlidersHorizontal,
     Sparkles,
     UserRound,
+    Webhook,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useState } from 'react';
@@ -14,6 +16,7 @@ import { toast } from 'sonner';
 import { router } from '@inertiajs/react';
 import { settings as aiSettingsRoute } from '@/actions/App/Http/Controllers/AiAccountController';
 import { ChatSettingsAdvanced } from '@/components/ai-chat/chat-settings-advanced';
+import { ChatSettingsInfo } from '@/components/ai-chat/chat-settings-info';
 import { ChatSettingsTools } from '@/components/ai-chat/chat-settings-tools';
 import { ChatSettingsPersona } from '@/components/ai-chat/chat-settings-persona';
 import type { PersonaErrors } from '@/components/ai-chat/chat-settings-persona';
@@ -30,7 +33,8 @@ import type {
     AiChatSettings,
 } from '@/types';
 
-type TabKey = 'persona' | 'advanced' | 'skill' | 'agent' | 'mcp';
+type TabKey =
+    'persona' | 'advanced' | 'skill' | 'agent' | 'mcp' | 'rules' | 'hooks';
 
 type TextFields = {
     custom_instructions: string;
@@ -248,7 +252,6 @@ export function ChatSettingsForm({
                     vendor={vendor}
                     errors={errors}
                     busy={busy !== null}
-                    onReset={() => void reset()}
                 />
             ),
         },
@@ -303,6 +306,19 @@ export function ChatSettingsForm({
                 />
             ),
         })),
+        ...(
+            [
+                ['rules', 'Rules', 'Rules của dự án', ScrollText],
+                ['hooks', 'Hook', 'Hook đang chạy', Webhook],
+            ] as const
+        ).map(([key, label, title, icon]) => ({
+            key,
+            label,
+            title,
+            icon,
+            failed: false,
+            content: <ChatSettingsInfo kind={key} projects={projects} />,
+        })),
     ];
     const activeSection =
         sections.find((section) => section.key === tab) ?? sections[0];
@@ -354,6 +370,18 @@ export function ChatSettingsForm({
                             ))}
                         </div>
                         <DialogFooter className="border-t pt-3">
+                            {/* * Resets the persona settings (name, voice, instructions), so it sits with the persona section. */}
+                            {tab === 'persona' && (
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    className="text-muted-foreground sm:mr-auto"
+                                    disabled={busy !== null}
+                                    onClick={() => void reset()}
+                                >
+                                    Khôi phục mặc định
+                                </Button>
+                            )}
                             <Button
                                 type="button"
                                 variant="ghost"

@@ -250,3 +250,18 @@ html.no-transitions *::after {
         animation: none;
     }
 }
+
+/* The lines the person asked the AI about, kept highlighted after the editor loses focus. */
+.pm-asked-range {
+    background-color: color-mix(in oklab, var(--primary) 28%, transparent);
+}
+
+/* The comment box sits inside Monaco, whose stylesheet outlines every focused element; the box draws its own focus ring. */
+.monaco-editor .pm-inline-ask :focus {
+    outline: none !important;
+}
+
+/* The app's own Field draws a focus ring; the comment box keeps the editor free of it. */
+.monaco-editor .pm-inline-ask textarea:focus-visible {
+    box-shadow: none !important;
+}

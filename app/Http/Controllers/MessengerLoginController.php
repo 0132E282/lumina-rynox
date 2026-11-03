@@ -73,8 +73,8 @@ class MessengerLoginController extends Controller
     }
 
     /**
-     * Signs in with the Facebook the person is logged into in this machine's own Chrome (the same session the Facebook posting uses):
-     * the cookies are read from that session, so nothing is pasted. A Chrome window opens for a login when there is none yet.
+     * Signs in through a Chrome window (Playwright) that opens on this machine: the person logs in to facebook.com there themselves,
+     * then the cookies are read from that session, so nothing is pasted.
      * ! Only on this machine (loopback, not production): the browser opens here, and the session file holds live credentials.
      */
     public function loginFromBrowser(Request $request, FacebookBrowserScript $script, FacebookWebSession $session): JsonResponse
@@ -103,19 +103,15 @@ class MessengerLoginController extends Controller
      */
     private function browserCookies(FacebookBrowserScript $script, FacebookWebSession $session): ?array
     {
-        // * `session` checks the login and refreshes the saved cookie header; with no login the `login` mode waits for the person to sign in.
+        // * Always opens the browser window (Playwright, the person's own Chrome profile): `login` returns once Facebook is signed in there, then `session` saves the fresh cookie header.
+        if ($script->run('login')['status'] !== 'ok') {
+            return null;
+        }
+
         $outcome = $script->run('session');
 
         if (! ($outcome['status'] === 'ok' && ($outcome['payload']['loggedIn'] ?? false) === true)) {
-            if ($script->run('login')['status'] !== 'ok') {
-                return null;
-            }
-
-            $outcome = $script->run('session');
-
-            if (! ($outcome['status'] === 'ok' && ($outcome['payload']['loggedIn'] ?? false) === true)) {
-                return null;
-            }
+            return null;
         }
 
         $header = $session->cookieHeader();

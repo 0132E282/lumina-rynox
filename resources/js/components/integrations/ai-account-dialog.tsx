@@ -60,7 +60,14 @@ export function AiAccountDialog({
 
     // * Already signed in: just save. Otherwise sign in through the CLI first and save once it reports a user.
     const primary = async () => {
-        if (cliVendor !== null && cli.state !== 'in' && !(await cli.login())) {
+        // * A pasted token stands in for the machine's login: nothing to sign in to.
+        if (
+            cliVendor !== null &&
+            token.trim() === '' &&
+            // * A new account always signs in first (the login already on this machine is another account, saving it again would only copy it); an edit may keep the current login.
+            (account === null || cli.state !== 'in') &&
+            !(await cli.login())
+        ) {
             return;
         }
 
@@ -180,11 +187,40 @@ export function AiAccountDialog({
                     </div>
 
                     {cliVendor !== null ? (
-                        <CliLogin
-                            vendor={cliVendor}
-                            state={cli.state}
-                            reason={cli.reason}
-                        />
+                        <>
+                            <CliLogin
+                                vendor={cliVendor}
+                                state={cli.state}
+                                reason={cli.reason}
+                            />
+                            <div className="grid gap-2">
+                                <Label htmlFor={`${idPrefix}-token`}>
+                                    Hoặc nhập token phiên (không bắt buộc)
+                                </Label>
+                                <Input
+                                    id={`${idPrefix}-token`}
+                                    type="password"
+                                    autoComplete="off"
+                                    value={token}
+                                    placeholder={
+                                        account?.token_mask ??
+                                        'Dán token của tài khoản khác'
+                                    }
+                                    onChange={(event) =>
+                                        setToken(event.target.value)
+                                    }
+                                    aria-invalid={!!errors.token}
+                                />
+                                <p className="text-xs text-muted-foreground">
+                                    {cliVendor === 'anthropic'
+                                        ? 'Lấy bằng lệnh `claude setup-token` (cookie của claude.ai không dùng được). '
+                                        : 'Dùng API key của Codex (cookie của chatgpt.com không dùng được). '}
+                                    Có token thì CLI dùng token này thay cho tài
+                                    khoản đăng nhập trên máy.
+                                </p>
+                                <InputError message={errors.token} />
+                            </div>
+                        </>
                     ) : (
                         <div className="grid gap-2">
                             <Label htmlFor={`${idPrefix}-token`}>Token</Label>
@@ -221,16 +257,18 @@ export function AiAccountDialog({
                     >
                         Huỷ
                     </Button>
-                    {cliVendor !== null && cli.state === 'in' && (
-                        <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => void cli.login()}
-                            disabled={submitting}
-                        >
-                            Đăng nhập lại
-                        </Button>
-                    )}
+                    {cliVendor !== null &&
+                        account !== null &&
+                        cli.state === 'in' && (
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => void cli.login()}
+                                disabled={submitting}
+                            >
+                                Đăng nhập lại
+                            </Button>
+                        )}
                     <Button
                         type="button"
                         onClick={() => void primary()}
@@ -242,8 +280,12 @@ export function AiAccountDialog({
                     >
                         {loggingIn
                             ? 'Đang đăng nhập…'
-                            : cliVendor !== null && cli.state !== 'in'
-                              ? 'Đăng nhập'
+                            : cliVendor !== null &&
+                                token.trim() === '' &&
+                                (account === null || cli.state !== 'in')
+                              ? account === null
+                                  ? 'Đăng nhập và lưu'
+                                  : 'Đăng nhập'
                               : 'Lưu'}
                     </Button>
                 </DialogFooter>

@@ -100,7 +100,7 @@ export function ProposalCard({
             const route = kind === 'apply' ? applyProposals : rejectProposals;
             const { data } = await api.post<{ proposals: AiChatProposal[] }>(
                 kind === 'revert'
-                    ? `/ai-chat/messages/${messageId}/proposals/revert-local`
+                    ? `/ai-chat/messages/${messageId}/proposals/revert-local?force=1`
                     : kind === 'apply' && isLocal
                       ? `/ai-chat/messages/${messageId}/proposals/apply-local`
                       : route.url(messageId),
