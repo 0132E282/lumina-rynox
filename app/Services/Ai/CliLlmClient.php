@@ -63,7 +63,7 @@ final class CliLlmClient implements LlmClient
 
         foreach ($agents as $index => $agent) {
             $ids[$index] = 'agent-'.($index + 1);
-            $parsers[$ids[$index]] = new ClaudeStreamParser($activity, $ids[$index]);
+            $parsers[$ids[$index]] = new ClaudeStreamParser($activity, $ids[$index], app(AgentWorkspace::class)->path());
             $activity->agent(['id' => $ids[$index], 'parent' => null, 'role' => $agent['role'], 'task' => mb_substr($agent['task'], 0, 160), 'step' => '', 'status' => 'running']);
         }
 
@@ -113,7 +113,7 @@ final class CliLlmClient implements LlmClient
         // * PHP's own max_execution_time (30 s by default) would cut the request before the CLI's own timeout does.
         @set_time_limit(self::TIMEOUT_SECONDS + 15);
 
-        $stream = $this->vendor === 'anthropic' ? new ClaudeStreamParser(app(ChatActivity::class), $agentId) : null;
+        $stream = $this->vendor === 'anthropic' ? new ClaudeStreamParser(app(ChatActivity::class), $agentId, app(AgentWorkspace::class)->path()) : null;
 
         try {
             $result = Process::path($directory)
@@ -135,12 +135,14 @@ final class CliLlmClient implements LlmClient
             // * Only a fixed pattern of the CLI's own output is looked at; its text is never shown, stored or logged.
             $output = $result->output().$result->errorOutput();
 
+            $quota = $this->quotaHit($output);
+
             throw new AiException(match (true) {
                 $this->notLoggedIn($output) => AiException::CLI_NOT_LOGGED_IN,
-                $this->quotaHit($output) => AiException::QUOTA,
+                $quota => AiException::QUOTA,
                 $result->exitCode() === 127 => AiException::CLI_NOT_FOUND,
                 default => AiException::CLI_UNAVAILABLE,
-            }, $this->quotaHit($output) ? QuotaLimit::parse($output) : null);
+            }, $quota ? QuotaLimit::parse($output) : null);
         }
 
         // * Claude answers in stream-json: its `result` line is the text; any other output (older CLI) is the text itself.
@@ -155,7 +157,8 @@ final class CliLlmClient implements LlmClient
 
     private function directory(): string
     {
-        $directory = storage_path('app/ai-cli');
+        // * An approved plan on a cloned GitHub repo works inside that clone.
+        $directory = app(AgentWorkspace::class)->path() ?? storage_path('app/ai-cli');
         File::ensureDirectoryExists($directory);
 
         return $directory;
@@ -244,7 +247,8 @@ final class CliLlmClient implements LlmClient
 
         return match ($this->vendor) {
             // * Print mode reads the prompt from stdin; the tools that edit files, run commands or reach the web are denied.
-            'anthropic' => ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--disallowedTools', 'Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch', ...$this->mcpArguments(), ...($model === null ? [] : ['--model', $model])],
+            // * Inside a repo clone (an approved plan) file edits are allowed there and only there; commands and the web stay denied.
+            'anthropic' => ['claude', '-p', '--output-format', 'stream-json', '--verbose', ...(app(AgentWorkspace::class)->path() === null ? ['--disallowedTools', 'Bash,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch'] : ['--permission-mode', 'acceptEdits', '--disallowedTools', 'Bash,WebFetch,WebSearch']), ...$this->mcpArguments(), ...($model === null ? [] : ['--model', $model])],
             // * `-` reads the prompt from stdin; the read-only sandbox blocks writes and commands that change anything.
             'openai' => ['codex', 'exec', ...array_map(fn (string $path): string => '--image='.$path, $images), '--sandbox', 'read-only', '--skip-git-repo-check', ...($model === null ? [] : ['--model', $model]), '-'],
             // * The stdin text is appended to this fixed instruction.

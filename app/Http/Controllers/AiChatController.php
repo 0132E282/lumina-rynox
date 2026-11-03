@@ -11,6 +11,8 @@ use App\Models\AiChangeProposal;
 use App\Models\AiChatSetting;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
+use App\Models\AiUsageLog;
+use App\Services\Ai\AgentWorkspace;
 use App\Services\Ai\AiAssistant;
 use App\Services\Ai\AiException;
 use App\Services\Ai\AiUsageStats;
@@ -31,12 +33,15 @@ use App\Services\Integrations\IntegrationManager;
 use App\Support\LineDiff;
 use App\Support\ResourcePermission;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -249,7 +254,7 @@ class AiChatController extends Controller
         try {
             $prompt = $this->assistant->optimizePrompt(trim($data['message']), isset($data['ai_account_id']) ? (int) $data['ai_account_id'] : null, $data['ai_model'] ?? null);
         } catch (AiException $exception) {
-            return response()->json(['message' => $exception->getMessage()], 422);
+            return response()->json(['message' => $exception->userMessage()], 422);
         }
 
         return response()->json(['prompt' => $prompt]);
@@ -283,6 +288,8 @@ class AiChatController extends Controller
                 $emit(['type' => 'done', 'status' => 404, 'data' => ['message' => 'Không tìm thấy cuộc trò chuyện.']]);
             } catch (\Throwable $exception) {
                 report($exception);
+                // * `report()` skips some exception types: the class and message (never sent to the page) always reach the log.
+                Log::error('ai-chat.stream failed: '.$exception::class.': '.$exception->getMessage(), ['file' => $exception->getFile().':'.$exception->getLine()]);
                 $emit(['type' => 'done', 'status' => 500, 'data' => ['message' => 'Không gọi được trợ lý AI.']]);
             }
         }, 200, ['Content-Type' => 'application/x-ndjson', 'Cache-Control' => 'no-cache', 'X-Accel-Buffering' => 'no']);
@@ -341,8 +348,21 @@ class AiChatController extends Controller
             }
         }
 
+        // * The project the chat belongs to: a GitHub repo, or `local:<folder>` for a folder of this machine (so it is listed under that project).
+        $project = $repo ?? ($localRoot === null ? null : self::LOCAL_PREFIX.$localRoot);
+
         // * An approved plan handed to the AI ("Duyệt và làm"): it works from the plan's task list in the message, so the project's file tree and files are not read for it.
         $planRun = preg_match('~^Plan docs/plans/[\w.-]+\.json đã được duyệt~u', $text) === 1;
+
+        // * An approved plan on a GitHub project works in that repo's local clone (`storage/app/repos`), where the agents may edit files; never in the original repo.
+        if ($planRun && $repo !== null) {
+            app(AgentWorkspace::class)->useRepo($repo);
+        }
+
+        // * An approved plan on a local project works in that folder itself (the clone mechanism is for GitHub only); editing it needs the same permission as applying a local edit.
+        if ($planRun && $localRoot !== null && ResourcePermission::allows($user, 'ai', 'local-write')) {
+            app(AgentWorkspace::class)->useLocal($localRoot);
+        }
 
         try {
             if ($localRoot !== null) {
@@ -392,11 +412,14 @@ class AiChatController extends Controller
                 $this->promptProfile($user),
             ), AiMessage::MAX_CONTENT_LENGTH, '');
         } catch (AiException|GithubException|LocalWorkspaceException $exception) {
-            return response()->json(['message' => $exception->getMessage()], 422);
+            // * A coding chat is kept even when the answer failed (quota, timeout...): the question stays in the project's list and the thread can go on.
+            $kept = $project === null ? null : $this->keepFailedTurn($user, $conversation, $project, $notes === [] ? $text : $text."\n\n".implode(' · ', $notes));
+
+            return response()->json([
+                'message' => $exception instanceof AiException ? $exception->userMessage() : $exception->getMessage(),
+            ] + ($kept === null ? [] : ['conversation' => $this->conversationPayload($kept)]), 422);
         }
 
-        // * The project the chat belongs to: a GitHub repo, or `local:<folder>` for a folder of this machine (so it is listed under that project).
-        $project = $repo ?? ($localRoot === null ? null : self::LOCAL_PREFIX.$localRoot);
         $stored = $notes === [] ? $text : $text."\n\n".implode(' · ', $notes);
 
         // * Edits the AI proposed become pending proposals (diffed against the repo now); only the person's approval ever writes to GitHub.
@@ -445,6 +468,8 @@ class AiChatController extends Controller
             'user_message' => $this->messagePayload($userMessage),
             'assistant_message' => $this->messagePayload($assistantMessage->load('proposals')),
             'auto_pr_error' => $autoPrError,
+            // * Another AI answered because the picked one hit its quota: the page switches its picker to it.
+            'answered_by' => $this->switchedTo($request),
             // * What the app read for this answer (names and counts only), shown in the agent popup.
             'activity' => app(ChatActivity::class)->all(),
         ]);
@@ -777,6 +802,14 @@ class AiChatController extends Controller
      */
     private function accountsPayload(Collection $accounts): array
     {
+        try {
+            // * The latest reset time each account's quota stops stated (statistics are optional: a missing column just means none).
+            $resets = AiUsageLog::query()->where('status', AiUsageLog::STATUS_QUOTA)->whereNotNull('limit_reset_at')->groupBy('ai_account_id')
+                ->selectRaw('ai_account_id, MAX(limit_reset_at) as reset_at')->pluck('reset_at', 'ai_account_id')->all();
+        } catch (QueryException) {
+            $resets = [];
+        }
+
         return $accounts->where('enabled', true)
             ->filter(fn (AiAccount $account): bool => $account->allowsPurpose(AiAccount::PURPOSE_ASK))
             ->map(fn (AiAccount $account): array => [
@@ -789,7 +822,54 @@ class AiChatController extends Controller
                 // * Only API accounts have a cap we set; a CLI account runs under its own limits, unknown here.
                 'max_output_tokens' => $account->auth_type === AiAccount::AUTH_API ? ApiLlmClient::MAX_OUTPUT_TOKENS : null,
                 'status' => $account->status,
+                'out_of_quota' => $this->outOfQuota($account, $resets[$account->id] ?? null),
             ])->values()->all();
+    }
+
+    /**
+     * True while the account's last call stopped on its quota: until the reset time the limit error stated, else for an hour after that call.
+     *
+     * @param  string|null  $resetAt  the latest reset time any quota stop of this account stated
+     */
+    private function outOfQuota(AiAccount $account, ?string $resetAt): bool
+    {
+        if ($account->status !== 'error' || $account->last_error !== AiException::QUOTA) {
+            return false;
+        }
+
+        return $resetAt !== null
+            ? Carbon::parse($resetAt)->isFuture()
+            : $account->last_checked_at !== null && $account->last_checked_at->gt(now()->subHour());
+    }
+
+    /** @return array{account_id: int, model: string|null}|null the account that answered, only when it is not the one picked */
+    private function switchedTo(Request $request): ?array
+    {
+        $answered = $this->assistant->answeredBy();
+        $picked = $request->input('ai_account_id');
+
+        return $answered !== null && $picked !== null && (int) $picked !== $answered['account_id'] ? $answered : null;
+    }
+
+    /** Saves the person's question (and the thread, when it is new) after the AI failed to answer it. */
+    private function keepFailedTurn(Admin $user, ?AiConversation $conversation, string $project, string $stored): AiConversation
+    {
+        $conversation = DB::transaction(function () use ($user, $conversation, $project, $stored): AiConversation {
+            $conversation ??= AiConversation::query()->create(['user_id' => $user->id, 'repo' => $project, 'title' => Str::limit(Str::squish($stored), AiConversation::TITLE_LENGTH, '…')]);
+
+            if ($conversation->repo === null) {
+                $conversation->update(['repo' => $project]);
+            }
+
+            $conversation->messages()->create(['role' => AiMessage::ROLE_USER, 'content' => $stored]);
+            $conversation->touch();
+
+            return $conversation;
+        });
+
+        Cache::forget(self::recentsCacheKey($user->id));
+
+        return $conversation;
     }
 
     /** @return array{id: string, title: string, updated_at: string} `id` is the public uuid */

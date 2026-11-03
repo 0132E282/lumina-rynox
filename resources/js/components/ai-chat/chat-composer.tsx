@@ -56,6 +56,29 @@ import type {
     AiChatSelection,
 } from '@/types';
 
+// * A generated account name ends with the token type ("OpenAI / Codex · Session token"): the picker shows just the provider ("OpenAI").
+const accountLabel = (account: AiChatAccount) =>
+    account.name
+        .replace(/ · (?:API token|Session token)(?: \d+)?$/, '')
+        .replace(/^OpenAI \/ Codex$/, 'OpenAI');
+
+/** * Green while the account has quota, red once its last call stopped on the quota. */
+function QuotaDot({ account }: { account: AiChatAccount }) {
+    const out = account.out_of_quota === true;
+
+    return (
+        <span
+            role="img"
+            aria-label={out ? 'Hết token' : 'Còn token'}
+            title={out ? 'Hết token' : 'Còn token'}
+            className={cn(
+                'size-2 shrink-0 rounded-full',
+                out ? 'bg-red-500' : 'bg-green-500',
+            )}
+        />
+    );
+}
+
 /**
  * Rounded textarea + round send button. Custom (not the shared `Field`) because it needs Enter-to-send with Shift+Enter for a newline.
  */
@@ -203,6 +226,11 @@ export function ChatComposer({
         const onPointerDown = (event: PointerEvent) => {
             const target = event.target as Element | null;
 
+            // * A popup is open (its dark backdrop is "outside" too): that click only closes the popup, never the panel under it.
+            if (document.querySelector('[role="dialog"], [role="listbox"]')) {
+                return;
+            }
+
             // * Menus and popups opened from inside the panel live in portals outside it: a click in them is not "outside".
             if (
                 !panelRef.current?.contains(target) &&
@@ -213,7 +241,7 @@ export function ChatComposer({
                 setAgentsOpen(false);
             }
         };
-        const onKeyDown = (event: KeyboardEvent) => {
+        const onKeyDown = (event: globalThis.KeyboardEvent) => {
             // * Escape closes an open popup or menu first, not the panel under it.
             if (
                 event.key === 'Escape' &&
@@ -223,14 +251,21 @@ export function ChatComposer({
             }
         };
 
-        document.addEventListener('pointerdown', onPointerDown);
-        document.addEventListener('keydown', onKeyDown);
+        // * Capture phase: the check runs before the popup's own handler closes it, so an open popup is still seen as open.
+        document.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('keydown', onKeyDown, true);
 
         return () => {
-            document.removeEventListener('pointerdown', onPointerDown);
-            document.removeEventListener('keydown', onKeyDown);
+            document.removeEventListener('pointerdown', onPointerDown, true);
+            document.removeEventListener('keydown', onKeyDown, true);
         };
     }, [agentsOpen]);
+    useEffect(() => {
+        // * Plan mode only exists inside a project: leaving it for a general chat goes back to Auto.
+        if (repo === null && mode === 'plan') {
+            onModeChange('auto');
+        }
+    }, [repo, mode, onModeChange]);
     const projectPlans = useProjectPlans(repo, agentsOpen, proposals);
     const [agentTab, setAgentTab] = useState<'kanban' | 'diagram'>('kanban');
     // * The panel sits in the middle of the chat column: centred on the composer's width, and on the window's height.
@@ -362,7 +397,7 @@ export function ChatComposer({
     return (
         <div ref={rootRef} className="@container relative flex flex-col gap-2">
             {/* * Big panel in the middle of the chat while an AI works: who is running, what step, and what the app read for it. Opens by itself; the person can close it. */}
-            {agentsOpen && (
+            {agentsOpen && repo !== null && (
                 <section
                     ref={panelRef}
                     aria-label="Agent đang làm việc"
@@ -440,15 +475,18 @@ export function ChatComposer({
                                 projectTasks={projectPlans.tasks}
                                 planError={projectPlans.error}
                                 startDisabled={sending}
-                                onChatAbout={(card) => {
-                                    onChange(
-                                        `Sửa ${card.badge ? `${card.badge}: ` : ''}${card.text}\nFeedback: `,
-                                    );
+                                vendorKey={picked?.vendor_key ?? ''}
+                                vendorLabel={picked?.vendor ?? 'AI'}
+                                onChatAbout={(card, feedback) => {
+                                    const message = `Sửa ${card.badge ? `${card.badge}: ` : ''}${card.text}\nFeedback: ${feedback}`;
+
+                                    if (onSendMessage) {
+                                        onSendMessage(message);
+                                    } else {
+                                        onChange(message);
+                                    }
+
                                     setAgentsOpen(false);
-                                    setTimeout(
-                                        () => textareaRef.current?.focus(),
-                                        0,
-                                    );
                                 }}
                                 onStartPlan={
                                     onSendMessage && projectPlans.selected
@@ -834,7 +872,7 @@ export function ChatComposer({
                                 size="icon"
                                 disabled={busy}
                                 aria-label="Thêm tùy chọn"
-                                className="invisible w-0 overflow-hidden px-0 text-muted-foreground opacity-0 transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:visible @max-lg:w-8 @max-lg:opacity-100"
+                                className="invisible w-0 overflow-hidden px-0 text-muted-foreground opacity-0 transition-[width,opacity] duration-200 motion-reduce:transition-none @max-2xl:visible @max-2xl:w-8 @max-2xl:opacity-100"
                             >
                                 <Plus aria-hidden="true" />
                             </Button>
@@ -854,36 +892,42 @@ export function ChatComposer({
                                 <Wand2 aria-hidden="true" />
                                 Tối ưu
                             </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                                onSelect={() => onModeChange('auto')}
-                                className="justify-between gap-2"
-                            >
-                                <span className="flex items-center gap-2">
-                                    <Zap aria-hidden="true" />
-                                    Auto
-                                </span>
-                                {mode === 'auto' && (
-                                    <Check aria-hidden="true" />
-                                )}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onSelect={() => onModeChange('plan')}
-                                className="justify-between gap-2"
-                            >
-                                <span className="flex items-center gap-2">
-                                    <ListChecks aria-hidden="true" />
-                                    Plan
-                                </span>
-                                {mode === 'plan' && (
-                                    <Check aria-hidden="true" />
-                                )}
-                            </DropdownMenuItem>
+                            {/* * Auto/Plan only matter inside a project (the Code tab). */}
+                            {repo !== null && (
+                                <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                        onSelect={() => onModeChange('auto')}
+                                        className="justify-between gap-2"
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <Zap aria-hidden="true" />
+                                            Auto
+                                        </span>
+                                        {mode === 'auto' && (
+                                            <Check aria-hidden="true" />
+                                        )}
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                        onSelect={() => onModeChange('plan')}
+                                        className="justify-between gap-2"
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <ListChecks aria-hidden="true" />
+                                            Plan
+                                        </span>
+                                        {mode === 'plan' && (
+                                            <Check aria-hidden="true" />
+                                        )}
+                                    </DropdownMenuItem>
+                                </>
+                            )}
                             {accounts.map((account) => (
                                 <div key={account.id}>
                                     <DropdownMenuSeparator />
-                                    <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">
-                                        {account.name}
+                                    <DropdownMenuLabel className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                                        {accountLabel(account)}
+                                        <QuotaDot account={account} />
                                     </DropdownMenuLabel>
                                     {(account.models.length > 0
                                         ? account.models
@@ -927,7 +971,7 @@ export function ChatComposer({
                         aria-label="Đính kèm tệp"
                         title={`Đính kèm tệp (tối đa ${maxFiles})`}
                         onClick={() => fileInputRef.current?.click()}
-                        className="size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
+                        className="size-8 overflow-hidden text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-2xl:invisible @max-2xl:w-0 @max-2xl:px-0 @max-2xl:opacity-0"
                     >
                         <Paperclip aria-hidden="true" />
                     </Button>
@@ -939,7 +983,7 @@ export function ChatComposer({
                         aria-label="Tối ưu prompt"
                         title="Viết lại cho rõ ràng hơn (bạn xem rồi mới gửi)"
                         onClick={onOptimize}
-                        className="h-8 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
+                        className="h-8 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-2xl:invisible @max-2xl:w-0 @max-2xl:px-0 @max-2xl:opacity-0"
                     >
                         <Wand2 aria-hidden="true" />
                         {optimizing ? 'Đang tối ưu...' : 'Tối ưu'}
@@ -957,82 +1001,93 @@ export function ChatComposer({
                         </Button>
                     )}
                     <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
-                        <Button
-                            type="button"
-                            variant="ghost"
-                            aria-expanded={agentsOpen}
-                            data-agent-toggle=""
-                            onClick={() => setAgentsOpen((open) => !open)}
-                            size="sm"
-                            aria-label={
-                                agents.length === 0
-                                    ? 'Agent: đang rảnh'
-                                    : `${agents.length} agent đang làm việc`
-                            }
-                            className="h-8 shrink-0 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
-                        >
-                            <Bot aria-hidden="true" />
-                            {agents.length === 0 ? (
-                                'Agent'
-                            ) : (
-                                <>
-                                    <span
-                                        aria-hidden="true"
-                                        className="size-1.5 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
-                                    />
-                                    {agents.length} agent
-                                </>
-                            )}
-                        </Button>
-                        <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
+                        {/* * Agent and Plan belong to the Code tab only. */}
+                        {repo !== null && (
+                            <>
                                 <Button
                                     type="button"
                                     variant="ghost"
+                                    aria-expanded={agentsOpen}
+                                    data-agent-toggle=""
+                                    onClick={() =>
+                                        setAgentsOpen((open) => !open)
+                                    }
                                     size="sm"
-                                    disabled={busy}
-                                    aria-label="Chọn chế độ"
-                                    className="h-8 shrink-0 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
+                                    aria-label={
+                                        agents.length === 0
+                                            ? 'Agent: đang rảnh'
+                                            : `${agents.length} agent đang làm việc`
+                                    }
+                                    className="h-8 shrink-0 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-2xl:invisible @max-2xl:w-0 @max-2xl:px-0 @max-2xl:opacity-0"
                                 >
-                                    {mode === 'plan' ? (
-                                        <ListChecks aria-hidden="true" />
+                                    <Bot aria-hidden="true" />
+                                    {agents.length === 0 ? (
+                                        'Agent'
                                     ) : (
-                                        <Zap aria-hidden="true" />
+                                        <>
+                                            <span
+                                                aria-hidden="true"
+                                                className="size-1.5 animate-pulse rounded-full bg-emerald-500 motion-reduce:animate-none"
+                                            />
+                                            {agents.length} agent
+                                        </>
                                     )}
-                                    {mode === 'plan' ? 'Plan' : 'Auto'}
-                                    <ChevronDown aria-hidden="true" />
                                 </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent
-                                align="end"
-                                className="min-w-56"
-                            >
-                                <DropdownMenuItem
-                                    onSelect={() => onModeChange('auto')}
-                                    className="justify-between gap-2"
-                                >
-                                    <span className="flex items-center gap-2">
-                                        <Zap aria-hidden="true" />
-                                        Auto
-                                    </span>
-                                    {mode === 'auto' && (
-                                        <Check aria-hidden="true" />
-                                    )}
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                    onSelect={() => onModeChange('plan')}
-                                    className="justify-between gap-2"
-                                >
-                                    <span className="flex items-center gap-2">
-                                        <ListChecks aria-hidden="true" />
-                                        Plan: lập kế hoạch, chưa làm
-                                    </span>
-                                    {mode === 'plan' && (
-                                        <Check aria-hidden="true" />
-                                    )}
-                                </DropdownMenuItem>
-                            </DropdownMenuContent>
-                        </DropdownMenu>
+                                <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="sm"
+                                            disabled={busy}
+                                            aria-label="Chọn chế độ"
+                                            className="h-8 shrink-0 gap-1.5 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-2xl:invisible @max-2xl:w-0 @max-2xl:px-0 @max-2xl:opacity-0"
+                                        >
+                                            {mode === 'plan' ? (
+                                                <ListChecks aria-hidden="true" />
+                                            ) : (
+                                                <Zap aria-hidden="true" />
+                                            )}
+                                            {mode === 'plan' ? 'Plan' : 'Auto'}
+                                            <ChevronDown aria-hidden="true" />
+                                        </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent
+                                        align="end"
+                                        className="min-w-56"
+                                    >
+                                        <DropdownMenuItem
+                                            onSelect={() =>
+                                                onModeChange('auto')
+                                            }
+                                            className="justify-between gap-2"
+                                        >
+                                            <span className="flex items-center gap-2">
+                                                <Zap aria-hidden="true" />
+                                                Auto
+                                            </span>
+                                            {mode === 'auto' && (
+                                                <Check aria-hidden="true" />
+                                            )}
+                                        </DropdownMenuItem>
+                                        <DropdownMenuItem
+                                            onSelect={() =>
+                                                onModeChange('plan')
+                                            }
+                                            className="justify-between gap-2"
+                                        >
+                                            <span className="flex items-center gap-2">
+                                                <ListChecks aria-hidden="true" />
+                                                Plan: lập kế hoạch, chưa làm
+                                            </span>
+                                            {mode === 'plan' && (
+                                                <Check aria-hidden="true" />
+                                            )}
+                                        </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                </DropdownMenu>
+                            </>
+                        )}
                         {picked && (
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
@@ -1042,7 +1097,7 @@ export function ChatComposer({
                                         size="sm"
                                         disabled={busy}
                                         aria-label="Chọn AI trả lời"
-                                        className="h-8 shrink-0 gap-2 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-lg:invisible @max-lg:w-0 @max-lg:px-0 @max-lg:opacity-0"
+                                        className="h-8 shrink-0 gap-2 overflow-hidden px-2 text-muted-foreground transition-[width,opacity] duration-200 motion-reduce:transition-none @max-2xl:invisible @max-2xl:w-0 @max-2xl:px-0 @max-2xl:opacity-0"
                                     >
                                         <VendorBadge
                                             vendorKey={picked.vendor_key}
@@ -1052,6 +1107,7 @@ export function ChatComposer({
                                         <span className="max-w-32 truncate">
                                             {pickedLabel}
                                         </span>
+                                        <QuotaDot account={picked} />
                                         <ChevronDown aria-hidden="true" />
                                     </Button>
                                 </DropdownMenuTrigger>
@@ -1072,7 +1128,8 @@ export function ChatComposer({
                                                     fallback={account.vendor}
                                                     className="size-4 rounded text-[9px]"
                                                 />
-                                                {account.name}
+                                                {accountLabel(account)}
+                                                <QuotaDot account={account} />
                                             </DropdownMenuLabel>
                                             {(account.models.length > 0
                                                 ? account.models

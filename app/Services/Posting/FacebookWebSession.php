@@ -32,6 +32,19 @@ final class FacebookWebSession
     }
 
     /**
+     * The saved cookie header of the logged-in Chrome (any session file that has one, with or without the request templates).
+     * ! The value is a login credential: callers parse it and never log or return it.
+     */
+    public function cookieHeader(): ?string
+    {
+        $path = self::path();
+        $data = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
+        $header = is_array($data) ? ($data['cookie_header'] ?? null) : null;
+
+        return is_string($header) && trim($header) !== '' ? trim($header) : null;
+    }
+
+    /**
      * @return array{user_id: string, fb_dtsg: string, lsd: string, jazoest: string, cookie_header: string, template: array{params: array<string, string>, variables: array<string, mixed>}}|null
      *                                                                                                                                                                                            null when the file, any token or a complete template is missing: the HTTP tier cannot be used
      */

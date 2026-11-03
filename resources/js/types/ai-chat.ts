@@ -47,6 +47,8 @@ export type AiChatAccount = {
     max_output_tokens: number | null;
     /** * `connected|error|disconnected`. */
     status: string;
+    /** * True while the account's last call stopped on its quota (until the reset time, if one was stated). */
+    out_of_quota?: boolean;
 };
 
 /** * Answer mode: "auto" replies normally, "plan" asks for a step-by-step plan only. */
@@ -159,6 +161,8 @@ export type AiChatSendResponse = {
     user_message: AiChatMessage;
     assistant_message: AiChatMessage;
     auto_pr_error?: string | null;
+    /** Set when the picked AI hit its quota and another one answered. */
+    answered_by?: { account_id: number; model: string | null } | null;
     activity?: AiChatActivityStep[];
 };
 

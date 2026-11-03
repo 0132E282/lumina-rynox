@@ -442,9 +442,9 @@ export function LocalProjectDialog({
                                         Thêm mới
                                     </Button>
                                 </div>
-                                <div className="flex flex-col gap-2 rounded-xl border p-3">
+                                <div className="flex min-h-48 flex-col gap-2 rounded-xl border p-3">
                                     {folders.length === 0 && !picking && (
-                                        <p className="pt-3 text-center text-sm text-muted-foreground">
+                                        <p className="my-auto text-center text-sm text-muted-foreground">
                                             Thêm thư mục trên{' '}
                                             <span className="text-foreground">
                                                 máy này

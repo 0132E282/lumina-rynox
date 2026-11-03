@@ -162,7 +162,12 @@ export function ProposalCard({
                                 {proposal.path}
                             </span>
                             <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                                {ACTION_LABELS[proposal.action]}
+                                {/* * A plan not yet approved is still being drawn up. */}
+                                {planFile &&
+                                proposal.status === 'pending' &&
+                                proposal.path.startsWith('docs/plans/')
+                                    ? 'Đang lập'
+                                    : ACTION_LABELS[proposal.action]}
                                 {proposal.status !== 'pending' &&
                                     ` · ${proposal.status === 'applied' ? (isLocal ? 'đã áp dụng' : 'đã tạo PR') : proposal.status === 'reverted' ? 'đã hoàn tác' : 'đã bỏ qua'}`}
                             </span>
@@ -233,7 +238,7 @@ export function ProposalCard({
                     >
                         Bỏ qua
                     </Button>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="basis-full text-xs text-muted-foreground">
                         {isLocal
                             ? 'Chỉ ghi vào máy khi bạn bấm Áp dụng; tệp đã đổi kể từ lúc đề xuất sẽ bị từ chối.'
                             : planFile && onExecutePlan

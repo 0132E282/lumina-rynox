@@ -31,6 +31,8 @@ import type {
     MessengerAccountSummary,
 } from '@/types';
 
+const BROWSER_LOGIN_URL = '/integrations/messenger/login/browser';
+
 const RISKS = [
     'Kết nối không chính thức: Facebook có thể yêu cầu xác minh, tạm khoá hoặc khoá tài khoản.',
     'Nên dùng tài khoản phụ và bật xác minh 2 bước.',
@@ -77,6 +79,7 @@ export function MessengerAccountDialog({
                 .map((permission) => permission.key),
     );
     const [submitting, setSubmitting] = useState(false);
+    const [browserLogin, setBrowserLogin] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const toggle = (key: string, checked: boolean) =>
@@ -86,16 +89,25 @@ export function MessengerAccountDialog({
                 : current.filter((item) => item !== key),
         );
 
-    const submitLogin = async () => {
+    // * `viaBrowser`: no cookie is pasted; the server signs in with the Facebook already logged in this machine's Chrome (a window opens when there is no login yet).
+    const submitLogin = async (viaBrowser = false) => {
         setSubmitting(true);
+        setBrowserLogin(viaBrowser);
         setError(null);
 
         try {
-            await api.post(login.url(), {
-                cookies: form.getValues('cookies'),
-                risk_acknowledged: riskAcknowledged,
-                permissions: selected,
-            });
+            await api.post(
+                viaBrowser ? BROWSER_LOGIN_URL : login.url(),
+                {
+                    ...(viaBrowser
+                        ? {}
+                        : { cookies: form.getValues('cookies') }),
+                    risk_acknowledged: riskAcknowledged,
+                    permissions: selected,
+                },
+                // * A login in the Chrome window can take minutes.
+                viaBrowser ? { timeout: 400_000 } : undefined,
+            );
             onLoggedIn();
         } catch (caught) {
             const data = isAxiosError(caught)
@@ -113,6 +125,7 @@ export function MessengerAccountDialog({
         } finally {
             form.setValue('cookies', '');
             setSubmitting(false);
+            setBrowserLogin(false);
         }
     };
 
@@ -149,7 +162,7 @@ export function MessengerAccountDialog({
                     <DialogDescription>
                         {editing
                             ? 'Quyền và phạm vi chỉ áp dụng cho tài khoản này.'
-                            : 'Đăng nhập một tài khoản Facebook bằng cookie. Các tài khoản khác giữ nguyên.'}
+                            : 'Đăng nhập một tài khoản Facebook bằng cookie, hoặc bằng Facebook đang đăng nhập trên máy này. Các tài khoản khác giữ nguyên.'}
                     </DialogDescription>
                 </DialogHeader>
 
@@ -222,6 +235,19 @@ export function MessengerAccountDialog({
                     <Button type="button" variant="outline" onClick={onClose}>
                         Huỷ
                     </Button>
+                    {!editing && (
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={submitting || !riskAcknowledged}
+                            title="Mở Chrome trên máy này, đăng nhập Facebook rồi tự lấy cookie"
+                            onClick={() => void submitLogin(true)}
+                        >
+                            {browserLogin
+                                ? 'Đang chờ đăng nhập trong Chrome...'
+                                : 'Đăng nhập bằng Facebook trên máy này'}
+                        </Button>
+                    )}
                     <Button
                         type="button"
                         disabled={!canSubmit}
@@ -233,7 +259,7 @@ export function MessengerAccountDialog({
                             ? submitting
                                 ? 'Đang lưu...'
                                 : 'Lưu'
-                            : submitting
+                            : submitting && !browserLogin
                               ? 'Đang đăng nhập...'
                               : 'Đăng nhập'}
                     </Button>

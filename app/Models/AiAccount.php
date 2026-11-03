@@ -47,6 +47,7 @@ class AiAccount extends Model
             'claude-haiku-5-5' => 'Haiku 5.5',
         ],
         'openai' => [
+            'gpt-6-luna' => 'GPT-6 Luna',
             'gpt-5.6-luna' => 'GPT-5.6 Luna',
             'gpt-5.6-terra' => 'GPT-5.6 Terra',
         ],

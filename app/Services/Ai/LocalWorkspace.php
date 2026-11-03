@@ -377,6 +377,16 @@ class LocalWorkspace
         return $roots;
     }
 
+    /**
+     * The real folder of a root the person may use, for an agent that works inside it (an approved plan run).
+     *
+     * @throws LocalWorkspaceException
+     */
+    public function path(string $rootId): string
+    {
+        return $this->rootPath($rootId);
+    }
+
     /** @throws LocalWorkspaceException */
     private function rootPath(string $rootId): string
     {

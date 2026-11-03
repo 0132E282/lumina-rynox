@@ -14,6 +14,9 @@ final class ClaudeStreamParser
 
     private string $buffer = '';
 
+    /** Tools whose target file counts as "edited" by the agent. */
+    private const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+
     private ?string $result = null;
 
     /** @var array<string, list<string>> files each agent edited (agent id => paths) */
@@ -23,7 +26,7 @@ final class ClaudeStreamParser
     private array $running = [];
 
     /** @param  string|null  $rootId  the agent this run belongs to: the subagents it starts hang under it, and its own result marks it done */
-    public function __construct(private readonly ChatActivity $activity, private readonly ?string $rootId = null) {}
+    public function __construct(private readonly ChatActivity $activity, private readonly ?string $rootId = null, private readonly ?string $base = null) {}
 
     public function feed(string $chunk): void
     {
@@ -60,7 +63,7 @@ final class ClaudeStreamParser
                 $tokens = (int) ($usage['input_tokens'] ?? 0) + (int) ($usage['output_tokens'] ?? 0)
                     + (int) ($usage['cache_creation_input_tokens'] ?? 0) + (int) ($usage['cache_read_input_tokens'] ?? 0);
 
-                $this->activity->agent(['id' => $this->rootId, 'step' => 'Đã xong', 'status' => 'done'] + ($tokens > 0 ? ['tokens' => $tokens] : []) + ($this->files[$this->rootId] ?? [] ? ['files' => $this->files[$this->rootId]] : []));
+                $this->activity->agent(['id' => $this->rootId, 'step' => 'Đã xong', 'status' => 'done'] + ($tokens > 0 ? ['tokens' => $tokens] : []) + (($this->files[$this->rootId] ?? []) !== [] ? ['files' => $this->files[$this->rootId]] : []));
             }
 
             return;
@@ -118,15 +121,22 @@ final class ClaudeStreamParser
 
         if ($owner !== null && ($owner === $this->rootId || isset($this->running[$owner]))) {
             $target = $input['file_path'] ?? $input['path'] ?? $input['pattern'] ?? $input['command'] ?? '';
-            $edited = in_array($name, ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'], true) && is_string($target) && $target !== ''
-                && ! in_array($target, $this->files[$owner] ?? [], true) && count($this->files[$owner] ?? []) < 50;
+            // * Shown relative to the clone; the same path is compared and stored, so a file edited twice is listed once.
+            $shown = is_string($target) ? $this->relative($target) : '';
+            $edited = in_array($name, self::EDIT_TOOLS, true) && $shown !== ''
+                && ! in_array($shown, $this->files[$owner] ?? [], true) && count($this->files[$owner] ?? []) < 50;
 
             if ($edited) {
-                $this->files[$owner][] = $this->text($target, 300);
+                $this->files[$owner][] = $shown;
             }
 
             $this->activity->agent(['id' => $owner, 'step' => trim($name.' '.$this->text($target, 120)), 'status' => 'running'] + ($edited ? ['files' => $this->files[$owner]] : []));
         }
+    }
+
+    private function relative(string $path): string
+    {
+        return $this->text($this->base !== null && str_starts_with($path, $this->base.'/') ? substr($path, strlen($this->base) + 1) : $path, 300);
     }
 
     /** @param array<string, mixed> $block */

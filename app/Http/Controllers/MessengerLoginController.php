@@ -11,6 +11,9 @@ use App\Services\Chat\Matrix\MatrixException;
 use App\Services\Chat\Messenger\MessengerChannel;
 use App\Services\Chat\Messenger\MessengerCookies;
 use App\Services\Integrations\IntegrationManager;
+use App\Services\Posting\FacebookBrowserScript;
+use App\Services\Posting\FacebookWebSession;
+use Closure;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -66,18 +69,83 @@ class MessengerLoginController extends Controller
 
         $cookies = $this->parsedCookies((string) $validated['cookies']);
 
+        return $this->withLock(fn (): array => $cookies, self::LOCK_SECONDS);
+    }
+
+    /**
+     * Signs in with the Facebook the person is logged into in this machine's own Chrome (the same session the Facebook posting uses):
+     * the cookies are read from that session, so nothing is pasted. A Chrome window opens for a login when there is none yet.
+     * ! Only on this machine (loopback, not production): the browser opens here, and the session file holds live credentials.
+     */
+    public function loginFromBrowser(Request $request, FacebookBrowserScript $script, FacebookWebSession $session): JsonResponse
+    {
+        $validated = $request->validate([
+            'risk_acknowledged' => ['accepted'],
+            'permissions' => ['nullable', 'array'],
+            'permissions.*' => ['string', 'distinct', Rule::in(MessengerAccount::PERMISSIONS)],
+        ]);
+        $this->requestedPermissions = isset($validated['permissions']) ? array_values($validated['permissions']) : null;
+
+        if (app()->isProduction() || ! in_array($request->server('REMOTE_ADDR'), ['127.0.0.1', '::1'], true)) {
+            return $this->unavailable(422, 'Đăng nhập bằng trình duyệt chỉ dùng được khi mở app ngay trên máy này.');
+        }
+
         if (! $this->channel->configured()) {
             return $this->unavailable(503, MessengerChannel::NOT_CONFIGURED);
         }
 
-        $lock = Cache::lock(self::LOCK_KEY, self::LOCK_SECONDS);
+        // * The lock covers the whole run, Chrome window included: a second click cannot open a second window.
+        return $this->withLock(fn (): array|JsonResponse => $this->browserCookies($script, $session) ?? $this->unavailable(422, 'Chưa đăng nhập được Facebook trong cửa sổ Chrome. Hãy đăng nhập facebook.com ở cửa sổ vừa mở rồi thử lại.'), self::LOCK_SECONDS + 420);
+    }
+
+    /**
+     * @return array<string, string>|null the `c_user`/`xs` cookies of the logged-in Chrome; null when there is no login
+     */
+    private function browserCookies(FacebookBrowserScript $script, FacebookWebSession $session): ?array
+    {
+        // * `session` checks the login and refreshes the saved cookie header; with no login the `login` mode waits for the person to sign in.
+        $outcome = $script->run('session');
+
+        if (! ($outcome['status'] === 'ok' && ($outcome['payload']['loggedIn'] ?? false) === true)) {
+            if ($script->run('login')['status'] !== 'ok') {
+                return null;
+            }
+
+            $outcome = $script->run('session');
+
+            if (! ($outcome['status'] === 'ok' && ($outcome['payload']['loggedIn'] ?? false) === true)) {
+                return null;
+            }
+        }
+
+        $header = $session->cookieHeader();
+
+        try {
+            $cookies = $header === null ? [] : MessengerCookies::parse($header);
+        } catch (InvalidArgumentException) {
+            return null;
+        }
+
+        return MessengerCookies::hasRequired($cookies, 'c_user', 'xs') ? $cookies : null;
+    }
+
+    /** @param Closure(): (array<string, string>|JsonResponse) $cookies the cookies to sign in with, or the response that refuses */
+    private function withLock(Closure $cookies, int $seconds): JsonResponse
+    {
+        if (! $this->channel->configured()) {
+            return $this->unavailable(503, MessengerChannel::NOT_CONFIGURED);
+        }
+
+        $lock = Cache::lock(self::LOCK_KEY, $seconds);
 
         if (! $lock->get()) {
             return $this->unavailable(409, 'Đang có một lượt đăng nhập Messenger khác, hãy thử lại sau.');
         }
 
         try {
-            return $this->signIn($cookies);
+            $resolved = $cookies();
+
+            return $resolved instanceof JsonResponse ? $resolved : $this->signIn($resolved);
         } finally {
             $lock->release();
         }

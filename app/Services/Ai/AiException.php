@@ -42,6 +42,14 @@ final class AiException extends RuntimeException
 
     public const NO_MESSAGES = 'Hội thoại chưa có tin nhắn để gợi ý.';
 
+    /** The fixed text, plus the reset time of a quota stop when the vendor's error stated one. */
+    public function userMessage(): string
+    {
+        $resetAt = $this->getMessage() === self::QUOTA ? $this->limit?->resetAt : null;
+
+        return $resetAt === null ? $this->getMessage() : $this->getMessage().' Thời gian reset: '.$resetAt->format('H:i d/m/Y').'.';
+    }
+
     /** A short class of the failure for the usage log: derived from the fixed text, so nothing of the vendor's own error is kept. */
     public function kind(): string
     {

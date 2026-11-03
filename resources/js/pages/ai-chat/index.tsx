@@ -500,6 +500,22 @@ function ChatPanel({
             const pull = proposals.find((proposal) => proposal.pull_url);
 
             onLog('ok', 'AI đã trả lời.');
+
+            // * The picked AI hit its quota and another one answered: the picker follows it.
+            if (data.answered_by) {
+                const switched = aiAccounts.find(
+                    (item) => item.id === data.answered_by?.account_id,
+                );
+
+                onSelectionChange({
+                    accountId: data.answered_by.account_id,
+                    model: data.answered_by.model,
+                });
+                onLog(
+                    'info',
+                    `AI đã chọn hết hạn mức, tự chuyển sang ${switched?.name ?? 'AI khác'}.`,
+                );
+            }
             // * A call was just made: the usage stats are out of date.
             invalidateAiChatCache('usage');
 
@@ -583,6 +599,23 @@ function ChatPanel({
                 setFiles(sentFiles);
 
                 return;
+            }
+
+            // * The server keeps the question of a coding chat even when the answer failed: the thread goes on from there and shows in the project's list.
+            const kept = (
+                caught as {
+                    response?: { data?: { conversation?: { id: string } } };
+                }
+            ).response?.data?.conversation?.id;
+
+            if (kept && mounted.current) {
+                conversationId.current = kept;
+                router.reload({ only: ['conversations'] });
+            }
+
+            if (!axios.isAxiosError(caught)) {
+                // * Not a server answer (a script error or a dropped connection): the page's own error text hides it, so the console keeps it.
+                console.error('ai-chat send failed', caught);
             }
 
             onLog('error', `Gửi tin nhắn lỗi: ${aiErrorMessage(caught)}`);

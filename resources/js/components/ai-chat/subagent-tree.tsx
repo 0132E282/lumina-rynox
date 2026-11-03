@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 const NODE_W = 164;
 const ROOT_W = 212;
 const ROOT_H = 52;
-const NODE_MAX_W = 600;
+const NODE_MAX_W = 380;
 const NODE_H = 56;
 const COL_GAP = 160;
 const ROW_GAP = 20;
@@ -30,6 +30,9 @@ type Placed = {
     meta: string;
     edge: string;
     running: boolean;
+    seconds: number;
+    tokens: number | null;
+    files: string[];
 };
 
 const tokenLabel = (tokens: number) =>
@@ -83,6 +86,12 @@ export function SubagentTree({
             meta: `${agent.status === 'running' ? '' : 'Xong · '}${Math.max(0, Math.floor(((agent.endedAt ?? now) - agent.startedAt) / 1000))}s${agent.tokens ? ` · ${tokenLabel(agent.tokens)}` : ''}`,
             edge: agent.task,
             running: agent.status === 'running',
+            seconds: Math.max(
+                0,
+                Math.floor(((agent.endedAt ?? now) - agent.startedAt) / 1000),
+            ),
+            tokens: agent.tokens ?? null,
+            files: agent.files ?? [],
         });
 
         if (children.length === 0) {
@@ -119,7 +128,7 @@ export function SubagentTree({
                   )) /
               2;
     const maxDepth = Math.max(0, ...placed.map((node) => node.depth));
-    // * A column is as wide as its longest line needs (task, step), from 164px up to 600px; every node of the column has that width.
+    // * A column is as wide as its longest line needs (task, step), from 164px up to 380px; every node of the column has that width.
     const colW = Array.from({ length: maxDepth + 1 }, (_, depth) =>
         depth === 0
             ? ROOT_W
@@ -195,6 +204,11 @@ export function SubagentTree({
                 viewBox={`0 0 ${width} ${height}`}
                 className="shrink-0 text-muted-foreground"
             >
+                <style>{`
+                    @keyframes subagent-flow { to { stroke-dashoffset: -14; } }
+                    .subagent-edge-run { animation: subagent-flow 0.8s linear infinite; }
+                    @media (prefers-reduced-motion: reduce) { .subagent-edge-run { animation: none; } }
+                `}</style>
                 <defs>
                     <marker
                         id="subagent-arrow"
@@ -218,6 +232,13 @@ export function SubagentTree({
                                 fill="none"
                                 stroke="currentColor"
                                 strokeWidth="1.5"
+                                strokeDasharray="6 8"
+                                strokeLinecap="round"
+                                className={
+                                    node.running
+                                        ? 'subagent-edge-run'
+                                        : undefined
+                                }
                                 markerEnd="url(#subagent-arrow)"
                             />
                         </g>
@@ -331,14 +352,53 @@ export function SubagentTree({
             >
                 <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
                     <DialogHeader>
-                        <DialogTitle>{openAgent?.role}</DialogTitle>
-                        <DialogDescription>
-                            {openAgent?.running
-                                ? 'Agent này đang chạy.'
-                                : 'Agent này đã chạy xong.'}
+                        <DialogTitle className="flex flex-wrap items-center gap-2">
+                            {openAgent?.title}
+                            <span
+                                className={cn(
+                                    'rounded-full px-2 py-0.5 text-xs font-medium',
+                                    openAgent?.running
+                                        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                        : 'bg-muted text-muted-foreground',
+                                )}
+                            >
+                                {openAgent?.running ? 'Đang chạy' : 'Đã xong'}
+                            </span>
+                        </DialogTitle>
+                        <DialogDescription className="sr-only">
+                            Việc được giao, bước đang chạy và các file agent đã
+                            sửa.
                         </DialogDescription>
                     </DialogHeader>
                     <div className="flex flex-col gap-3 text-sm">
+                        <dl className="flex gap-2 text-xs">
+                            <div className="min-w-0 flex-1 rounded-md border px-2 py-1">
+                                <dt className="text-muted-foreground">
+                                    Thời gian
+                                </dt>
+                                <dd className="font-medium tabular-nums">
+                                    {openAgent?.seconds}s
+                                </dd>
+                            </div>
+                            {openAgent?.tokens != null && (
+                                <div className="min-w-0 flex-1 rounded-md border px-2 py-1">
+                                    <dt className="text-muted-foreground">
+                                        Token
+                                    </dt>
+                                    <dd className="font-medium tabular-nums">
+                                        {tokenLabel(openAgent.tokens)}
+                                    </dd>
+                                </div>
+                            )}
+                            <div className="min-w-0 flex-1 rounded-md border px-2 py-1">
+                                <dt className="text-muted-foreground">
+                                    File đã sửa
+                                </dt>
+                                <dd className="font-medium tabular-nums">
+                                    {openAgent?.files.length}
+                                </dd>
+                            </div>
+                        </dl>
                         <section className="flex flex-col gap-1">
                             <h4 className="text-xs font-medium text-muted-foreground">
                                 Việc được giao
@@ -347,20 +407,34 @@ export function SubagentTree({
                                 {openAgent?.edge || '—'}
                             </p>
                         </section>
-                        <section className="flex flex-col gap-1">
-                            <h4 className="text-xs font-medium text-muted-foreground">
-                                {openAgent?.running
-                                    ? 'Đang thực thi'
-                                    : 'Bước cuối'}
-                            </h4>
-                            <p className="font-mono text-xs break-words whitespace-pre-wrap">
-                                {openAgent?.detail ||
-                                    (openAgent?.running ? 'Đang làm…' : '—')}
-                            </p>
-                        </section>
-                        <p className="text-xs text-muted-foreground">
-                            {openAgent?.meta}
-                        </p>
+                        {openAgent?.running && (
+                            <section className="flex flex-col gap-1">
+                                <h4 className="text-xs font-medium text-muted-foreground">
+                                    Đang thực thi
+                                </h4>
+                                <p className="font-mono text-xs break-words whitespace-pre-wrap">
+                                    {openAgent.detail || 'Đang làm…'}
+                                </p>
+                            </section>
+                        )}
+                        {openAgent !== undefined &&
+                            openAgent.files.length > 0 && (
+                                <section className="flex flex-col gap-1">
+                                    <h4 className="text-xs font-medium text-muted-foreground">
+                                        File đã sửa
+                                    </h4>
+                                    <ul className="flex max-h-48 flex-col gap-0.5 overflow-y-auto font-mono text-xs">
+                                        {openAgent.files.map((file) => (
+                                            <li
+                                                key={file}
+                                                className="break-all"
+                                            >
+                                                {file}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </section>
+                            )}
                     </div>
                 </DialogContent>
             </Dialog>

@@ -6,8 +6,10 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { Loader2, MessageSquare, Play } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { VendorBadge } from '@/components/ai-chat/vendor-badge';
 import { cn } from '@/lib/utils';
 import {
     Select,
@@ -50,9 +52,17 @@ export function TaskBoard({
     onStartPlan,
     startDisabled = false,
     onChatAbout,
+    vendorKey = '',
+    vendorLabel = 'AI',
 }: {
+    /** * The AI that takes the tasks: its logo marks every card an agent has picked up. */
+    vendorKey?: string;
+    vendorLabel?: string;
     /** * "Chat với AI": puts the opened card in the draft so the person can say what to change. */
-    onChatAbout?: (card: { badge: string | null; text: string }) => void;
+    onChatAbout?: (
+        card: { badge: string | null; text: string },
+        feedback: string,
+    ) => void;
     /** * Plans of `docs/plans/index.json` of the picked project, the chosen one and its tasks (read-only). */
     projectPlans?: PlanEntry[];
     selectedPlan?: string | null;
@@ -66,9 +76,29 @@ export function TaskBoard({
     subagents: AiSubagent[];
 }) {
     const [open, setOpen] = useState<Card | null>(null);
+    // * The small chat box of the popup ("Chat với AI để sửa"): what to change about this card.
+    const [chatting, setChatting] = useState(false);
+    const [feedback, setFeedback] = useState('');
+    const sendFeedback = () => {
+        const text = feedback.trim();
+
+        if (open && onChatAbout && text !== '') {
+            onChatAbout(open, text);
+            setOpen(null);
+            setChatting(false);
+            setFeedback('');
+        }
+    };
     // * Cards the person dragged to another column (card key => column): kept per plan, so a reload keeps them.
     const storageKey = `ai-chat.board.${selectedPlan ?? ''}`;
-    const [moved, setMoved] = useState<Record<string, ColumnId>>({});
+    const [moved, setMoved] = useState<
+        Record<string, { from: ColumnId; to: ColumnId }>
+    >({});
+    // * The column each card belongs to by its own state (not by a drag), refreshed on every render.
+    const naturals = useRef<Record<string, ColumnId>>({});
+    // * A drag only holds while the card's own state is what it was when dropped: once the agent moves on, the board follows it.
+    const isMoved = (key: string) =>
+        moved[key] !== undefined && moved[key].from === naturals.current[key];
     const [dragKey, setDragKey] = useState<string | null>(null);
     const [overColumn, setOverColumn] = useState<ColumnId | null>(null);
 
@@ -106,9 +136,68 @@ export function TaskBoard({
         }
     }, [progressKey]);
 
+    // * A card that changes column glides from where it was to where it is now (and flashes), so the person sees which task just moved.
+    const cardRefs = useRef(new Map<string, HTMLLIElement>());
+    const lastSeen = useRef(
+        new Map<string, { column: string | undefined; rect: DOMRect }>(),
+    );
+
+    useLayoutEffect(() => {
+        const calm = window.matchMedia(
+            '(prefers-reduced-motion: reduce)',
+        ).matches;
+        const next = new Map<
+            string,
+            { column: string | undefined; rect: DOMRect }
+        >();
+
+        cardRefs.current.forEach((element, key) => {
+            const rect = element.getBoundingClientRect();
+            const column = element.dataset.column;
+            const before = lastSeen.current.get(key);
+
+            next.set(key, { column, rect });
+
+            if (!calm && before && before.column !== column) {
+                element.animate(
+                    [
+                        {
+                            transform: `translate(${before.rect.left - rect.left}px, ${before.rect.top - rect.top}px)`,
+                            boxShadow: '0 0 0 2px rgba(16, 185, 129, 0.9)',
+                        },
+                        {
+                            transform: 'none',
+                            boxShadow: '0 0 0 2px rgba(16, 185, 129, 0)',
+                        },
+                    ],
+                    { duration: 600, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' },
+                );
+            }
+        });
+        lastSeen.current = next;
+    });
+
+    // * "Bắt đầu" is a new run: what an earlier run left (done tasks, their files, dragged cards) must not stay on the board.
+    const resetProgress = () => {
+        setProgress({});
+        setTaskFiles({});
+        setMoved({});
+
+        try {
+            localStorage.removeItem(progressKey);
+            localStorage.removeItem(filesKey);
+            localStorage.removeItem(storageKey);
+        } catch {
+            // * Storage blocked: the board is cleared until the panel closes.
+        }
+    };
+
     const drop = (column: ColumnId) => {
         if (dragKey !== null) {
-            const next = { ...moved, [dragKey]: column };
+            const from = naturals.current[dragKey];
+            const next = from
+                ? { ...moved, [dragKey]: { from, to: column } }
+                : moved;
 
             setMoved(next);
 
@@ -249,8 +338,10 @@ export function TaskBoard({
     }, [liveSig, progressKey]);
 
     // * A dragged card sits in the column it was dropped on; the others in the one their state says.
-    const place = (column: ColumnId, card: Card) =>
-        columns[moved[card.key] ?? column].push(card);
+    const place = (column: ColumnId, card: Card) => {
+        naturals.current[card.key] = column;
+        columns[isMoved(card.key) ? moved[card.key].to : column].push(card);
+    };
 
     projectTasks.forEach((task, index) => {
         const status =
@@ -348,7 +439,10 @@ export function TaskBoard({
                         <Button
                             type="button"
                             size="sm"
-                            onClick={onStartPlan}
+                            onClick={() => {
+                                resetProgress();
+                                onStartPlan();
+                            }}
                             disabled={
                                 startDisabled || projectTasks.length === 0
                             }
@@ -371,7 +465,7 @@ export function TaskBoard({
                     )}
                 </div>
             )}
-            <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-3 lg:grid-cols-5 lg:grid-rows-1 lg:overflow-hidden">
+            <div className="flex min-h-0 flex-1 snap-x snap-mandatory [scrollbar-width:thin] gap-2 overflow-x-auto overflow-y-hidden overscroll-x-contain pb-1 md:snap-none">
                 {COLUMNS.map((column) => (
                     <section
                         key={column.id}
@@ -395,7 +489,7 @@ export function TaskBoard({
                             drop(column.id);
                         }}
                         className={cn(
-                            'flex min-h-96 min-w-0 flex-col gap-2 overflow-y-auto rounded-xl border bg-muted/30 p-3 transition-colors duration-150 motion-reduce:transition-none lg:min-h-0',
+                            'flex min-h-0 w-[17rem] min-w-[15rem] flex-1 shrink-0 snap-start [scrollbar-width:thin] flex-col gap-2 overflow-y-auto overscroll-contain rounded-xl border bg-muted/30 p-3 transition-colors duration-150 motion-reduce:transition-none',
                             overColumn === column.id &&
                                 'border-primary/60 bg-primary/5',
                         )}
@@ -421,6 +515,17 @@ export function TaskBoard({
                             {columns[column.id].map((card) => (
                                 <li
                                     key={card.key}
+                                    ref={(element) => {
+                                        if (element) {
+                                            cardRefs.current.set(
+                                                card.key,
+                                                element,
+                                            );
+                                        } else {
+                                            cardRefs.current.delete(card.key);
+                                        }
+                                    }}
+                                    data-column={column.id}
                                     draggable
                                     onDragStart={(event) => {
                                         event.dataTransfer.effectAllowed =
@@ -441,9 +546,33 @@ export function TaskBoard({
                                         onClick={() => setOpen(card)}
                                         className="flex w-full flex-col gap-1 rounded-lg border bg-background px-2.5 py-2 text-left text-sm shadow-sm transition-all duration-150 hover:-translate-y-0.5 hover:border-primary/50 hover:bg-accent/40 hover:shadow-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none motion-reduce:hover:translate-y-0"
                                     >
-                                        {card.badge && (
-                                            <span className="w-fit rounded-sm bg-primary/10 px-1.5 py-0.5 text-xs font-medium">
-                                                {card.badge}
+                                        {(card.badge ||
+                                            (column.id !== 'todo' &&
+                                                !isMoved(card.key))) && (
+                                            <span className="flex items-center gap-1.5">
+                                                {card.badge && (
+                                                    <span className="w-fit rounded-sm bg-primary/10 px-1.5 py-0.5 text-xs font-medium">
+                                                        {card.badge}
+                                                    </span>
+                                                )}
+                                                {/* * An agent picked this card up: the AI's logo shows which one. */}
+                                                {column.id !== 'todo' &&
+                                                    !isMoved(card.key) && (
+                                                        <span
+                                                            title={`${vendorLabel} đang nhận việc này`}
+                                                            className="ml-auto"
+                                                        >
+                                                            <VendorBadge
+                                                                vendorKey={
+                                                                    vendorKey
+                                                                }
+                                                                fallback={
+                                                                    vendorLabel
+                                                                }
+                                                                className="size-4 rounded-sm text-[9px]"
+                                                            />
+                                                        </span>
+                                                    )}
                                             </span>
                                         )}
                                         <span className="line-clamp-3 break-words">
@@ -463,7 +592,13 @@ export function TaskBoard({
             </div>
             <Dialog
                 open={open !== null}
-                onOpenChange={(value) => !value && setOpen(null)}
+                onOpenChange={(value) => {
+                    if (!value) {
+                        setOpen(null);
+                        setChatting(false);
+                        setFeedback('');
+                    }
+                }}
             >
                 <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
                     <DialogHeader>
@@ -509,19 +644,51 @@ export function TaskBoard({
                         ))}
                     </div>
                     {open && onChatAbout && (
-                        <div className="flex justify-end">
-                            <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                    onChatAbout(open);
-                                    setOpen(null);
-                                }}
-                            >
-                                <MessageSquare className="size-3.5" />
-                                Chat với AI để sửa
-                            </Button>
+                        <div className="flex flex-col gap-2">
+                            {chatting ? (
+                                <div className="flex items-center gap-2">
+                                    <Input
+                                        value={feedback}
+                                        onChange={(event) =>
+                                            setFeedback(event.target.value)
+                                        }
+                                        onKeyDown={(event) => {
+                                            if (
+                                                event.key === 'Enter' &&
+                                                !event.nativeEvent.isComposing
+                                            ) {
+                                                event.preventDefault();
+                                                sendFeedback();
+                                            }
+                                        }}
+                                        aria-label="Nội dung cần sửa"
+                                        placeholder="Muốn AI sửa gì ở việc này?"
+                                        maxLength={500}
+                                        autoFocus
+                                        className="h-8"
+                                    />
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        onClick={sendFeedback}
+                                        disabled={feedback.trim() === ''}
+                                    >
+                                        Gửi
+                                    </Button>
+                                </div>
+                            ) : (
+                                <div className="flex justify-end">
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => setChatting(true)}
+                                    >
+                                        <MessageSquare className="size-3.5" />
+                                        Chat với AI để sửa
+                                    </Button>
+                                </div>
+                            )}
                         </div>
                     )}
                 </DialogContent>

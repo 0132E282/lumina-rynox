@@ -24,7 +24,11 @@ import {
 import { Input } from '@/components/ui/input';
 import { useCachedRequest } from '@/hooks/use-cached-request';
 import { api } from '@/lib/api';
-import { cachedRequest, invalidateAiChatCache } from '@/lib/ai-chat-cache';
+import {
+    cachedRequest,
+    invalidateAiChatCache,
+    peekAiChatRequest,
+} from '@/lib/ai-chat-cache';
 import { requestErrorMessage } from '@/lib/ai-error';
 import { OPEN_CONVERSATION_VISIT, PENDING_CHAT_ID } from '@/lib/ai-chat-visit';
 import { cn } from '@/lib/utils';
@@ -32,6 +36,9 @@ import { home } from '@/routes';
 import type { AiChatConversation, AiChatRepo } from '@/types';
 
 const REPOS_TTL_MS = 5 * 60 * 1000;
+
+// * The added-projects list of this visit: leaving the Code tab unmounts it, and coming back must not show "Đang tải..." again.
+let addedMemory: string[] | null = null;
 
 /** * "Code" tab: the projects the person can open (GitHub repos the token can read, plus the allowed local folders); picking one selects it for the chat and opens its code. */
 export function ProjectsTab({
@@ -51,7 +58,9 @@ export function ProjectsTab({
     onNavigate?: () => void;
 }) {
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
-    const [repos, setRepos] = useState<AiChatRepo[] | null>(null);
+    const [repos, setRepos] = useState<AiChatRepo[] | null>(
+        () => peekAiChatRequest<AiChatRepo[]>('github.repos')?.value ?? null,
+    );
     const [error, setError] = useState<string | null>(null);
     const [search, setSearch] = useState('');
     // * Same cached request as the "Máy local" menu: labels only, never a server path.
@@ -75,7 +84,17 @@ export function ProjectsTab({
     const [pendingDelete, setPendingDelete] = useState<string | null>(null);
     const [deleting, setDeleting] = useState(false);
     // * The GitHub repos the person added to this list (kept on the server per admin); repos that were not added never show.
-    const [added, setAdded] = useState<string[] | null>(null);
+    const [added, setAddedState] = useState<string[] | null>(addedMemory);
+    const setAdded = (
+        next: string[] | null | ((current: string[] | null) => string[] | null),
+    ) =>
+        setAddedState((current) => {
+            const value = typeof next === 'function' ? next(current) : next;
+
+            addedMemory = value;
+
+            return value;
+        });
 
     useEffect(() => {
         api.get<{ projects: string[] }>('/ai-chat/projects')
@@ -429,6 +448,23 @@ export function ProjectsTab({
                                     )}
                                     {isOpen && chats.length > 0 && (
                                         <ul className="mt-0.5 mb-1 ml-4 flex flex-col gap-0.5 pl-3">
+                                            <li>
+                                                {/* * Same action as picking the project (a fresh chat for it). */}
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        onSelect(row.full_name)
+                                                    }
+                                                    aria-label={`Cuộc trò chuyện mới trong ${row.full_name}`}
+                                                    className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left text-sm font-medium text-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none motion-reduce:transition-none"
+                                                >
+                                                    <Plus
+                                                        aria-hidden="true"
+                                                        className="size-3.5 shrink-0"
+                                                    />
+                                                    Cuộc trò chuyện mới
+                                                </button>
+                                            </li>
                                             {chats.map((conversation) =>
                                                 conversation.id ===
                                                 PENDING_CHAT_ID ? (
@@ -459,7 +495,7 @@ export function ProjectsTab({
                                                                     : undefined
                                                             }
                                                             className={cn(
-                                                                'text-foreground/80transition-colors block truncate rounded-lg px-2 py-1.5 pr-9 text-sm duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
+                                                                'block truncate rounded-lg px-2 py-1.5 pr-9 text-sm text-foreground/80 transition-colors duration-150 hover:bg-accent hover:text-accent-foreground motion-reduce:transition-none',
                                                                 conversation.id ===
                                                                     activeId &&
                                                                     'bg-accent text-accent-foreground',
